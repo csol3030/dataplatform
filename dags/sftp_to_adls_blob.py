@@ -218,7 +218,13 @@ with DAG(
             max=255
         ),
         "dest_container_name":Param(
-            default="cont-datalink-dp-shared/TEMP",
+            default="cont-datalink-dp-shared",
+            type=["string"],
+            min=3,
+            max=255
+        ),
+        "dest_folder_name":Param(
+            default="LANDING",
             type=["string"],
             min=3,
             max=255
@@ -259,9 +265,10 @@ with DAG(
         conf={
             "email":"abhilash.p@anblicks.com",
             "customer_id":"""{{params.customer_id}}""",
-            "root_folder_path":"""{{params.dest_container_name}}"""
+            "container_name":"""{{params.dest_container_name}}""",
+            "root_folder_name":"""{{params.dest_folder_name}}"""
         },
-        # execution_date=datetime(2022,2,7)
+        # execution_date=datetime(2022,2,7) 
     )
 
     create_conn >> upload_data_sftp_to_azure >> del_conn >> process_files_adls_to_snowflake
