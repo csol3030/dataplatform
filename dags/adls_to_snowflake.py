@@ -4,23 +4,22 @@ from airflow.models.param import Param
 from snowflake.snowpark import Session
 from snowflake.snowpark.functions import col
 from snowflake.snowpark.types import StructType, StructField, StringType, IntegerType, TimestampType
-from datetime import datetime, timedelta
 from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions
 from azure.identity import DefaultAzureCredential, AzureCliCredential
 from azure.keyvault.secrets import SecretClient
+from datetime import datetime, timedelta
 import pandas as pd
-import sys
+import urllib.parse
 import fnmatch
-import os
 import re
 import ntpath
 import json
-import urllib.parse
+
 
 # Snowflake configuration
 DATABASE = "DEV_OPS_DB"
 SCHEMA = "CONFIG"
-STRG_INT_NAME = 'DEV_BCBSAR_RAW_DB.PUBLIC.DATALINK_DP_AZURE_RAWFILE_STAGE'
+STAGE_NAME = 'DEV_BCBSAR_RAW_DB.PUBLIC.DATALINK_DP_AZURE_RAWFILE_STAGE'
 META_DATA_COLUMNS = ['FILENAME', 'FILE_ROW_NUMBER', 'START_SCAN_TIME']
 
 # Key vault configuration
@@ -56,7 +55,7 @@ def get_azure_connection(container_name):
     #use the client to connect to the container
     container_client = blob_service_client.get_container_client(container_name)
     sas = connection_str.split('SharedAccessSignature=')[1]
-    connection = (container_client, account_name, sas)
+    connection = (blob_service_client, container_client, account_name, sas)
     return connection
 
 def get_file_details(snowflake_session, customer_id):
@@ -69,34 +68,55 @@ def get_file_details(snowflake_session, customer_id):
 
 def get_file_col_details(snowflake_session, file_details_id):
     # Fetch records from FILE_COL_DETAILS Config table
-    file_col_details = snowflake_session.table("FILE_COL_DETAILS").filter(col("FILE_DETAILS_ID") == file_details_id).sort(col("COL_POSITION"))
+    file_col_details = snowflake_session.table("FILE_COL_DETAILS").\
+        filter(col("FILE_DETAILS_ID") == file_details_id).sort(col("COL_POSITION"))
     pd_df_file_col_details = file_col_details.to_pandas()
     return pd_df_file_col_details
 
-def update_file_ingestion_details(snowflake_session, file_details_id, ingestion_details, container_name):
+def update_file_ingestion_details(snowflake_session, file_details_id, file_path,
+                                  ingestion_details, handle_schema_drift):
     # creates a record in FILE_INGESTION_DETAILS table from COPY INTO command response
     schema = ["FILE_DETAILS_ID", "FILE_NAME", "FILE_PATH", "INGESTION_STATUS",
             "DATE_CREATED", "DATE_INGESTED", "ERROR_DETAILS", "INGESTED_ROW_COUNT",
             "UPDATED_BY", "WARNING_DETAILS"]
-    file_name = ntpath.basename(ingestion_details['file'])
-    file_path = ingestion_details['file'].split(container_name+'/')[-1]
+    file_name = ntpath.basename(file_path)
     error_details = ""
-    if ingestion_details['first_error']:
-        error_details = {
-            'first_error': ingestion_details['first_error'],
-            'error_limit': ingestion_details['error_limit'],
-            'errors_seen': ingestion_details['errors_seen'],
-            'first_error_line': ingestion_details['first_error_line'],
-            'first_error_character': ingestion_details['first_error_character'],
-            'first_error_column_name': ingestion_details['first_error_column_name']
-        }
-        error_details = json.dumps(error_details)
-    data = (file_details_id, file_name, file_path, ingestion_details['status'],
-        str(datetime.now()), str(datetime.now()), error_details, ingestion_details['rows_loaded'],
+    error_found = False
+    # file key will be in the response if copy into command is executed
+    if 'file' in ingestion_details:
+        if ingestion_details['first_error']:
+            error_details = {
+                'first_error': ingestion_details['first_error'],
+                'error_limit': ingestion_details['error_limit'],
+                'errors_seen': ingestion_details['errors_seen'],
+                'first_error_line': ingestion_details['first_error_line'],
+                'first_error_character': ingestion_details['first_error_character'],
+                'first_error_column_name': ingestion_details['first_error_column_name']
+            }
+            error_details = json.dumps(error_details)
+            error_found = True
+        status = ingestion_details['status']
+        rows_loaded = ingestion_details['rows_loaded']
+    # if schema drift can be handled but file key is not present
+    elif handle_schema_drift:
+        status = "LOAD_FAILED"
+        rows_loaded = 0
+        error_details = ingestion_details['status']
+    # if schema drift cannot be handled
+    else:
+        status = ingestion_details['status']
+        rows_loaded = 0
+        error_details = ingestion_details.get('error_details','')
+        error_found = True
+    data = (file_details_id, file_name, file_path, status,
+        str(datetime.now()), str(datetime.now()), error_details, rows_loaded,
         '', '')
-    query = f"insert into {DATABASE}.{SCHEMA}.FILE_INGESTION_DETAILS ({','.join(schema)}) values {str(data)}"
+    query = f"""insert into {DATABASE}.{SCHEMA}.FILE_INGESTION_DETAILS
+                ({','.join(schema)}) values {str(data)}
+            """
     resp = snowflake_session.sql(query).collect()
     print(resp)
+    return error_found
 
 def add_columns(snowflake_session, target_table, columns):
     columns_dtype = ','.join([f"{col} VARCHAR" for col in columns])
@@ -111,17 +131,20 @@ def format_columns(columns):
             continue
         if isinstance(col, (list, tuple)):
             col_list.append((col[0], re.sub(special_char_set,"_", col[1]).upper()))
-        else:    
+        else:
             col_list.append(re.sub(special_char_set,"_", col).upper())
     return col_list
 
-def pattern_matching(azure_session, file_name_pattern, file_wild_card_ext):
+def pattern_matching(azure_session, file_dict, context):
     # Returns a list of files if file_name_pattern matches
+    file_name_pattern = file_dict["file_name_pattern"]
+    customer_id = context["params"]["customer_id"]
+    root_folder = context["params"]["root_folder"]
     blob_list = []
-    for blob_i in azure_session.list_blobs():
+    for blob_i in azure_session.list_blobs(name_starts_with=f"{root_folder}/{str(customer_id)}"):
         file_name = blob_i.name.lower()
         file_name_pattern = file_name_pattern.lower()
-        if fnmatch.fnmatch(file_name, file_wild_card_ext.lower()):
+        if fnmatch.fnmatch(file_name, file_dict['file_wild_card_ext'].lower()):
             if "*" in file_name_pattern:
                 if '/' in file_name:
                     file_name = file_name.split('/')[-1]
@@ -132,16 +155,74 @@ def pattern_matching(azure_session, file_name_pattern, file_wild_card_ext):
                     blob_list.append(blob_i.name)
     return blob_list
 
-def read_blob(azure_connection, file_dict, container_name):
-    # Returns a list of tupple containing file_name, file_columns and respective sas_url 
-    azure_session, account_name, sas = azure_connection
-    blob_list = pattern_matching(azure_session, file_dict['file_name_pattern'], file_dict['file_wild_card_ext'])
+def get_file_columns(blob_service_client, container_name, src_file_path, field_delimiter):
+    file_columns = []
+    try:
+        blob_client = blob_service_client.get_blob_client(container_name, src_file_path)
+        data = blob_client.download_blob(offset=0, length=1024*1024).read()
+        data = data.decode("utf-8").splitlines()
+        if data:
+            file_columns = format_columns(data[0].split(field_delimiter))
+        else:
+            print("File is Empty")
+        return file_columns
+    except Exception as e:
+        if "INVALID_RANGE" in str(e.error_code).upper():
+            print("File is Empty")
+    return file_columns
+
+def read_blob(azure_connection, file_dict, container_name, context):
+    # Returns a list of tupple containing file_name, file_columns and respective sas_url
+    blob_service_client, azure_session, account_name, sas = azure_connection
+    blob_list = pattern_matching(azure_session, file_dict, context)
     blob_with_sas_list = []
     for blob_i in blob_list:
-        sas_url = 'https://' + account_name +'.blob.core.windows.net/' + container_name + '/' + blob_i + '?' + sas
-        file_columns = format_columns(pd.read_csv(sas_url, sep=file_dict['field_delimiter'], nrows=0).columns.to_list())
+        file_columns = get_file_columns(blob_service_client, container_name,
+                                        blob_i, file_dict['field_delimiter'])
         blob_with_sas_list.append((blob_i, file_columns))
     return blob_with_sas_list
+
+def copy_blob(blob_service_client, account_name, container_name,
+              src_file_path, sas, target_file_path):
+    # Copies file to target file path
+    source_blob_sas = 'https://' + account_name +'.blob.core.windows.net/' + \
+                      container_name + '/' + src_file_path + '?' + sas
+    copied_blob = blob_service_client.get_blob_client(container_name, target_file_path)
+    copied_blob.start_copy_from_url(source_blob_sas)
+
+def del_blob(blob_service_client, container_name, src_file_path):
+    # Deletes the specified file
+    source_blob_client = blob_service_client.get_blob_client(container_name, src_file_path)
+    source_blob_client.delete_blob()
+
+def move_blob(azure_connection, context, src_file_path, error_found):
+    # Copies file to target file path
+    # Deletes the source file
+    container_name = context["params"]["container_name"]
+    archive_folder = context["params"]["archive_folder"]
+    error_folder = context["params"]["error_folder"]
+    customer_id = context["params"]["customer_id"]
+    blob_service_client, azure_session, account_name, sas = azure_connection
+    src_file = ntpath.basename(src_file_path)
+    datetime_now = datetime.now()
+    src_file_split = src_file.split('.')
+    src_file = f"{src_file_split[0]}_{datetime_now.strftime('%H%m%S%f')}.{src_file_split[-1]}"
+    if error_found:
+        target_file_path = f"{error_folder}/{str(customer_id)}/{str(datetime_now.year)}_{str(datetime_now.month)}/{src_file}"
+    # elif status == "LOADED":
+    #     target_file_path = f"{archive_folder}/{str(customer_id)}/{str(datetime_now.year)}/{src_file}"
+    else:
+        target_file_path = f"{archive_folder}/{str(customer_id)}/{str(datetime_now.year)}/{src_file}"
+    copy_blob(blob_service_client, account_name, container_name,
+              src_file_path, sas, target_file_path)
+    del_blob(blob_service_client, container_name, src_file_path)
+
+def create_table(snowflake_session, columns, target_table):
+    columns_list = [ StructField(item, StringType()) for item in columns ]
+    columns_list.extend([StructField(col, StringType()) for col in META_DATA_COLUMNS])
+    schema_log = StructType(columns_list)
+    log_df = snowflake_session.create_dataframe([], schema=schema_log)
+    log_df.write.mode('overwrite').save_as_table(target_table)
 
 def get_or_create_target_table(snowflake_session, file_dict, file_columns):
     # creates table if not present, validate table columns and source file columns
@@ -154,30 +235,33 @@ def get_or_create_target_table(snowflake_session, file_dict, file_columns):
                 from {target_db}.information_schema.columns
                 where table_schema ilike '{target_schema}'
                 and table_name ilike '{target_table}'
-                order by ordinal_position;
-            """
+                order by ordinal_position;"""
     table_columns = snowflake_session.sql(query).collect()
     created = False
     if not table_columns:
-        # create table if not present
+        # create database, schema, table if not present
+        snowflake_session.sql(f"create database if not exists {target_db};").collect()
         snowflake_session.sql(f"create schema if not exists {target_db}.{target_schema};").collect()
+        target_table_ntp = f"{target_db}.{target_schema}.{target_table}"
         if not header_row:
-            file_columns = get_file_col_details(snowflake_session, file_details_id)[['COL_POSITION', 'COL_NAME']].values.tolist()
-            file_columns = format_columns(file_columns)
-            indexes, columns_to_create = zip(*file_columns)
-            columns_list = [ StructField(item, StringType()) for item in columns_to_create ]
-        else:
-            columns_list = [ StructField(item, StringType()) for item in file_columns ]
-        columns_list.extend([StructField(col, StringType()) for col in META_DATA_COLUMNS])
-        schema_log = StructType(columns_list)
-        log_df = snowflake_session.create_dataframe([], schema=schema_log)
-        log_df.write.mode('overwrite').save_as_table(f"{target_db}.{target_schema}.{target_table}")
+            file_config_columns = get_file_col_details(
+                snowflake_session, file_details_id)[['COL_POSITION', 'COL_NAME']].values.tolist()
+            file_config_columns = format_columns(file_config_columns)
+            # creates table only if length of file columns and config table columns are equal
+            if not len(file_config_columns) == len(file_columns):
+                return (created, file_config_columns)
+            indexes, file_columns = zip(*file_config_columns)
+            create_table(snowflake_session, file_columns, target_table_ntp)
+            created = True
+            return (created, file_config_columns)
+        create_table(snowflake_session, file_columns, target_table_ntp)
         created = True
         return (created, file_columns)
     else:
-        # validate the columns
+        # get table columns
         if not header_row:
-            table_columns = get_file_col_details(snowflake_session, file_details_id)[['COL_POSITION', 'COL_NAME']].values.tolist()
+            table_columns = get_file_col_details(
+                snowflake_session, file_details_id)[['COL_POSITION', 'COL_NAME']].values.tolist()
         else:
             pd_df = snowflake_session.create_dataframe(table_columns).to_pandas()
             table_columns = pd_df.to_dict(orient='list').get('COLUMN_NAME')
@@ -196,7 +280,7 @@ def get_schema_drift_columns(snowflake_session, target_table, file_columns, tabl
         if file_col not in table_columns:
             added_columns.append(file_col)
             table_columns_zip.append((file_ind, file_col))
-    if added_columns: 
+    if added_columns:
         add_columns(snowflake_session, target_table, added_columns)
     return (True, table_columns_zip)
 
@@ -205,23 +289,24 @@ def check_schema_drift(snowflake_session, file_dict, created, file_columns, tabl
     target_table = f"{file_dict.get('target_db')}.{file_dict.get('target_schema')}.{file_dict.get('target_table')}"
     if file_dict.get('contains_header_row'):
         if created or file_columns == table_columns:
-            return (False, list(enumerate(file_columns, start=1)))
+            return (True, list(enumerate(file_columns, start=1)))
         else:
-            return get_schema_drift_columns(snowflake_session, target_table, file_columns, table_columns)
+            return get_schema_drift_columns(snowflake_session, target_table,
+                                            file_columns, table_columns)
     else:
         # using FILE_COL_DETAILS columns
         if created or len(file_columns) == len(table_columns):
-            return (False, table_columns)
+            return (True, table_columns)
         else:
-            print(True, 'Error: Having schema drift without header row')
-            return (True, 'Error: Having schema drift without header row')
+            print('Error: Cannot Handle Schema Drift Without Header Row')
+            return (False, 'ERROR:Cannot Handle Schema Drift Without Header Row')
 
-def copy_into_snowflake(snowflake_session, file_dict, src_file_name, data):
+def copy_into_snowflake(snowflake_session, file_dict, src_file_name, data, root_folder):
     # use COPY INTO to load data into snowflake
     field_delimiter = file_dict.get('field_delimiter')
     file_wild_card_ext = file_dict.get('file_wild_card_ext')
     table_name = f"{file_dict.get('target_db')}.{file_dict.get('target_schema')}.{file_dict.get('target_table')}".upper()
-    src_file = ntpath.basename(src_file_name)
+    src_file = src_file_name.replace(f"{root_folder}/","")
     if 'txt' or 'csv' in file_wild_card_ext.lower():
         file_wild_card_ext = 'CSV'
     indexes, columns = map(list, zip(*data))
@@ -232,7 +317,9 @@ def copy_into_snowflake(snowflake_session, file_dict, src_file_name, data):
     file_format_str = f'type = {file_wild_card_ext} field_delimiter = "{field_delimiter}" EMPTY_FIELD_AS_NULL = False '
     if file_dict.get('contains_header_row'):
         file_format_str = file_format_str + ' SKIP_HEADER = 1'
-    copy_into_str = f"copy into {table_name} ({columns_str}) from (select {indexes_str} from '@{STRG_INT_NAME}/{src_file}' as t) FILE_FORMAT = ({file_format_str}) on_error='skip_file'"
+    copy_into_str = f"""copy into {table_name} ({columns_str}) from (select {indexes_str}
+                    from '@{STAGE_NAME}/{src_file}' as t) FILE_FORMAT = ({file_format_str})
+                    on_error='skip_file' FORCE = TRUE"""
     resp_copy_into = snowflake_session.sql(copy_into_str).collect()
     response = resp_copy_into[0].as_dict() if resp_copy_into else dict()
     print(response)
@@ -249,10 +336,11 @@ def process(**context):
         container_name = context["params"]["container_name"]
         snowflake_session = get_snowflake_connection()
         azure_connection = get_azure_connection(container_name)
-        df_file_details = get_file_details(snowflake_session,context['params']["customer_id"])
+        df_file_details = get_file_details(snowflake_session, context['params']["customer_id"])
+        print(context['params'])
         # for target_table, df_file_details in pd_df_file_details:
         for ind in df_file_details.index:
-            try:    
+            try:
                 file_dict = {}
                 file_dict['file_details_id'] = int(df_file_details['FILE_DETAILS_ID'][ind])
                 file_dict['customer_id'] = int(df_file_details['CUSTOMER_ID'][ind])
@@ -264,22 +352,30 @@ def process(**context):
                 file_dict['target_table'] = df_file_details['TARGET_TABLE'][ind]
                 file_dict['target_db'] = df_file_details['TARGET_DB'][ind]
                 file_dict['target_schema'] = df_file_details['TARGET_SCHEMA'][ind]
-                blob_list = read_blob(azure_connection, file_dict, container_name)
+                blob_list = read_blob(azure_connection, file_dict, container_name, context)
                 for item in blob_list:
                     blob_i, file_columns = item
+                    if not file_columns:
+                        continue
                     created, table_columns = get_or_create_target_table(
                         snowflake_session, file_dict, file_columns)
-                    is_schema_drift, columns_zip = check_schema_drift(
+                    handle_schema_drift, columns_zip = check_schema_drift(
                         snowflake_session, file_dict, created, file_columns, table_columns)
-                    response = copy_into_snowflake(
-                        snowflake_session, file_dict, src_file_name=blob_i, data=columns_zip)
-                    update_file_ingestion_details(
-                        snowflake_session, file_dict['file_details_id'], response,container_name)
+                    if handle_schema_drift:
+                        response = copy_into_snowflake(
+                            snowflake_session, file_dict, blob_i, columns_zip,
+                            context['params']["root_folder"])
+                    else:
+                        response = {'status': 'ERROR',
+                                    'error_details': 'Cannot Handle Schema Drift without Header Row'}
+                    error_found = update_file_ingestion_details(
+                        snowflake_session, file_dict['file_details_id'],
+                        blob_i, response, handle_schema_drift)
+                    move_blob(azure_connection, context, blob_i, error_found)
             except Exception as e:
                 print(e)
     except Exception as e:
         print(e)
-        
 
 default_args = {
     'owner': 'airflow',
@@ -305,9 +401,21 @@ with DAG(
             max=255
         ),
         "container_name" :Param(
-            default='cont-datalink-dp',
+            default='cont-datalink-dp-shared',
             type=["string"]
-        ) 
+        ),
+        "error_folder" :Param(
+            default='ERROR',
+            type=["string"]
+        ),
+        "archive_folder" :Param(
+            default='ARCHIVE',
+            type=["string"]
+        ),
+        "root_folder" :Param(
+            default='LANDING',
+            type=["string"]
+        )
     }
 )as dag:
 
