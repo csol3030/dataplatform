@@ -266,7 +266,9 @@ with DAG(
             "email":"""{{params.email}}""",
             "customer_id":"""{{params.customer_id}}""",
             "container_name":"""{{params.dest_container_name}}""",
-            "root_folder":"""{{params.dest_folder_name}}"""
+            "root_folder":"""{{params.dest_folder_name}}""",
+            "config_db":"""{{params.config_db}}""",
+            "config_schema":"""{{params.config_schema}}"""
         },
         # execution_date=datetime(2022,2,7) 
     )
