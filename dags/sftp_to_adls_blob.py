@@ -263,7 +263,7 @@ with DAG(
         trigger_dag_id="Process_ADLS_to_Snowflake",
         wait_for_completion=True,
         conf={
-            "email":"abhilash.p@anblicks.com",
+            "email":"""{{params.email}}""",
             "customer_id":"""{{params.customer_id}}""",
             "container_name":"""{{params.dest_container_name}}""",
             "root_folder_name":"""{{params.dest_folder_name}}"""
