@@ -8,6 +8,7 @@ from airflow import settings
 from airflow.decorators import task
 from airflow.models import Connection
 from airflow.models.param import Param
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.providers.microsoft.azure.transfers.sftp_to_wasb import SFTPToWasbOperator
 from airflow.providers.snowflake.hooks.snowflake import SnowflakeHook
 from airflow.operators.python import PythonOperator
@@ -246,26 +247,21 @@ with DAG(
         }
     )
 
-    # transfer_files_to_azure = SFTPToWasbOperator(
-    #     task_id="transfer_files_from_sftp_to_azure",
-    #     sftp_conn_id="datalink_sftp_conn",
-    #     sftp_source_path=SFTP_SRC_PATH,
-    #     move_object=False,
-    #     wasb_conn_id="datalink_adls_conn",
-    #     container_name=AZURE_CONTAINER_NAME,
-    #     blob_prefix=BLOB_PREFIX,
-    #     wasb_overwrite_object=True,
-    #     create_container=False
-    # )
-
-    # load_files_sftp_azure = PythonOperator(
-    #     task_id="load_files_sftp_azure",
-    #     python_callable=transfer_files_sftp_azure
-    # )
-
     del_conn = PythonOperator(
         task_id="delete_connections",
         python_callable=delete_connection
     )
 
-    create_conn >> upload_data_sftp_to_azure >> del_conn
+    process_files_adls_to_snowflake = TriggerDagRunOperator(
+        task_id="process_files_adls_to_snowflake",
+        trigger_dag_id="Process_ADLS_to_Snowflake",
+        wait_for_completion=True,
+        conf={
+            "email":"abhilash.p@anblicks.com",
+            "customer_id":"""{{params.customer_id}}""",
+            "root_folder_path":"""{{params.dest_container_name}}"""
+        },
+        # execution_date=datetime(2022,2,7)
+    )
+
+    create_conn >> upload_data_sftp_to_azure >> del_conn >> process_files_adls_to_snowflake
