@@ -194,7 +194,7 @@ default_args = {
 }
 
 with DAG(
-    dag_id='process_data_bronze_silver_raw_vault',
+    dag_id='transform_bronze_to_silver',
     default_args=default_args,
     description='A DAG to process data from Snowflake Bronze to Silver Raw Vault',
     schedule_interval=timedelta(days=30),
@@ -211,9 +211,9 @@ with DAG(
     }
 )as dag:
 
-    process_data_bronze_silver_raw_vault = PythonOperator(
-        task_id='process_data_bronze_silver_raw_vault',
+    transform_bronze_to_silver = PythonOperator(
+        task_id='transform_bronze_to_silver',
         python_callable=process
     )
 
-process_data_bronze_silver_raw_vault
+transform_bronze_to_silver
