@@ -52,12 +52,12 @@ def insert_into_table(snowflake_session, target_table, source_table, source_colu
     print(resp_insert_into)
     return resp_insert_into
 
-def update_brnz_slvr_details(snowflake_session, lst_brnz_slvr_dtls_id, db, schema, status):
+def update_brnz_slvr_details(snowflake_session, lst_brnz_slvr_dtls_id,
+                             db, schema, status, date_update_str):
     # Update STATUS and TIMESTAMP in BRONZE_TO_SILVER_DETAILS
     pks = ','.join([str(pk) for pk in lst_brnz_slvr_dtls_id])
     query = f"""update {db}.{schema}.BRONZE_TO_SILVER_DETAILS
-                set TRANSFORMATION_STATUS = '{status}',
-                DATE_UPDATED = to_timestamp('{str(datetime.now())}')
+                set TRANSFORMATION_STATUS = '{status}'{date_update_str}
                 where TRANSFORMATION_ID in ({pks})
             """
     resp = snowflake_session.sql(query).collect()
@@ -126,8 +126,9 @@ def transformation(snowflake_session, brnz_slvr_dtls_grp, brnz_slvr_dtls,
     try:
         source_schema, source_table, src_ld_dt, file_ing_dtls_id = brnz_slvr_dtls_grp
         lst_brnz_slvr_dtls_id = brnz_slvr_dtls['TRANSFORMATION_ID'].values.tolist()
-        # update_brnz_slvr_details(
-        #         snowflake_session, lst_brnz_slvr_dtls_id, db, schema, "INPROGRESS")
+        update_brnz_slvr_details(snowflake_session, lst_brnz_slvr_dtls_id,
+                                 db, schema, "IN PROGRESS",
+                                 f", START_DATE = to_timestamp('{str(datetime.now())}')")
         stm_details_df = get_stm_brnz_slvr_details(snowflake_session, source_schema, source_table)
         file_ing_dtls_id = int(file_ing_dtls_id)
         deleted_columns = get_deleted_columns(snowflake_session, file_ing_dtls_id)
@@ -163,9 +164,9 @@ def transformation(snowflake_session, brnz_slvr_dtls_grp, brnz_slvr_dtls,
                 if 'number of rows inserted' in row:
                     inserted_count += 1
         if inserted_count and inserted_count == to_be_inserted_count:
-            status = "COMPLETED"
-            update_brnz_slvr_details(
-                snowflake_session, lst_brnz_slvr_dtls_id, db, schema, status)
+            update_brnz_slvr_details(snowflake_session, lst_brnz_slvr_dtls_id,
+                                     db, schema,"COMPLETED",
+                                     f", END_DATE = to_timestamp('{str(datetime.now())}')")
     except Exception as e:
         print(e)
 
@@ -182,6 +183,7 @@ def process(**context):
                            brnz_slvr_dtls, db, schema)
     except Exception as e:
         print(e)
+
 
 default_args = {
     'owner': 'airflow',
