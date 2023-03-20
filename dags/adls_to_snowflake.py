@@ -389,62 +389,7 @@ def copy_into_snowflake(snowflake_session, file_dict, src_file_name, data, root_
     return response
 
 
-# Main function
-    # Iterates over FILE_DETIALS records
-    # Gets pattern matched files and respective file columns
-    # Checks if schema dirft is present
-    # Uses COPY INTO to snowflake
-    # Updates FILE_INGESTION_DETAILS table
-# def process(**context):
-    
-#     try:
-#         container_name = context["params"]["container_name"]
-#         snowflake_session = get_snowflake_connection()
-#         azure_connection = get_azure_connection(container_name)
-#         df_file_details = get_file_details(snowflake_session, context['params']["customer_id"])
-#         print(context['params'])
-#         # for target_table, df_file_details in pd_df_file_details:
-#         for ind in df_file_details.index:
-#             try:
-#                 file_dict = {}
-#                 file_dict['file_details_id'] = int(df_file_details['FILE_DETAILS_ID'][ind])
-#                 file_dict['customer_id'] = int(df_file_details['CUSTOMER_ID'][ind])
-#                 file_dict['file_name_pattern'] = df_file_details['FILE_NAME_PATTERN'][ind]
-#                 file_dict['file_wild_card_ext'] = df_file_details['FILE_WILD_CARD_EXT'][ind]
-#                 file_dict['field_delimiter'] = df_file_details['FIELD_DELIMITER'][ind]
-#                 file_dict['record_delimiter'] = df_file_details['RECORD_DELIMITER'][ind]
-#                 file_dict['contains_header_row'] = df_file_details['CONTAINS_HEADER_ROW'][ind]
-#                 file_dict['target_table'] = df_file_details['TARGET_TABLE'][ind]
-#                 file_dict['target_db'] = df_file_details['TARGET_DB'][ind]
-#                 file_dict['target_schema'] = df_file_details['TARGET_SCHEMA'][ind]
-#                 blob_list = read_blob(azure_connection, file_dict, container_name, context)
-#                 for item in blob_list:
-#                     blob_i, file_columns = item
-#                     if not file_columns:
-#                         continue
-#                     created, table_columns = get_or_create_target_table(
-#                         snowflake_session, file_dict, file_columns)
-#                     handle_schema_drift, columns_zip = check_schema_drift(
-#                         snowflake_session, file_dict, created, file_columns, table_columns)
-#                     if handle_schema_drift:
-#                         error_found=insert_file_ingestion_details(snowflake_session, blob_i)
-#                         response = copy_into_snowflake(
-#                             snowflake_session, file_dict, blob_i, columns_zip,
-#                             context['params']["root_folder"])
-#                     else:
-#                         response = {'status': 'ERROR',
-#                                     'error_details': 'Cannot Handle Schema Drift without Header Row'}
-                    
-#                     error_found = update_file_ingestion_details(
-#                         snowflake_session, file_dict['file_details_id'],
-#                         blob_i, response, handle_schema_drift)
-                    
-#                     error_found = update_bronze_to_sliver_details(snowflake_session,file_dict['target_table'])
-#                     move_blob(azure_connection, context, blob_i, error_found)
-#             except Exception as e:
-#                 print(e)
-#     except Exception as e:
-#         print(e)
+
 def process(**context):
     try:
         container_name = context["params"]["container_name"]
@@ -466,9 +411,6 @@ def process(**context):
                 file_dict['target_table'] = df_file_details['TARGET_TABLE'][ind]
                 file_dict['target_db'] = df_file_details['TARGET_DB'][ind]
                 file_dict['target_schema'] = df_file_details['TARGET_SCHEMA'][ind]
-                
-                # blob_list = read_blob(azure_connection, file_dict, container_name, context)
-                # print(blob_list)
                 handle_blob_list(snowflake_session, azure_connection, context, file_dict,container_name)
                 
             except Exception as e:
@@ -532,14 +474,6 @@ with DAG(
             default='cont-datalink-dp-shared',
             type=["string"]
         ),
-        # "error_folder" :Param(
-        #     default='ERROR',
-        #     type=["string"]
-        # ),
-        # "archive_folder" :Param(
-        #     default='ARCHIVE',
-        #     type=["string"]
-        # ),
         "root_folder" :Param(
             default='LANDING',
             type=["string"]
@@ -551,10 +485,6 @@ with DAG(
         task_id='Process_Files_ADLS_Snowflake',
         python_callable=process
     )
-    # handle_blob_list_task = PythonOperator(
-    #     task_id='handle_blob_list_task',
-    #     python_callable=handle_blob_list
-    # )
-
+    
 Process_Files_ADLS_Snowflake 
 
