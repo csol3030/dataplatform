@@ -1,5 +1,5 @@
 from airflow import DAG
-from airflow.operators.python_operator import PythonOperator
+from airflow.operators.python import PythonOperator
 from airflow.models.param import Param
 from snowflake.snowpark import Session
 from snowflake.snowpark.functions import col
@@ -72,16 +72,36 @@ def get_file_col_details(snowflake_session, file_details_id):
         filter(col("FILE_DETAILS_ID") == file_details_id).sort(col("COL_POSITION"))
     pd_df_file_col_details = file_col_details.to_pandas()
     return pd_df_file_col_details
+def insert_file_ingestion_details(snowflake_session, file_path):
+    file_name = ntpath.basename(file_path)
+    status = 'IN_PROGRESS'
+    error_found = False
+    updated_by=snowflake_session.sql("SELECT CURRENT_USER").collect()
+    updated_by = f"{updated_by}".split("=")[1].strip("')]'")
+    # DATE_CREATED=datetime.now()
+    schema = ["FILE_NAME", "INGESTION_STATUS",
+        "DATE_CREATED","UPDATED_BY"]
+    data = (file_name,status,str(datetime.now()),updated_by)
+    
+    query = f"""insert into {DATABASE}.{SCHEMA}.FILE_INGESTION_DETAILS
+                ({','.join(schema)}) values {str(data)}
+            """
+    resp = snowflake_session.sql(query).collect()
+    print(resp)
+    return error_found
 
 def update_file_ingestion_details(snowflake_session, file_details_id, file_path,
                                   ingestion_details, handle_schema_drift):
     # creates a record in FILE_INGESTION_DETAILS table from COPY INTO command response
-    schema = ["FILE_DETAILS_ID", "FILE_NAME", "FILE_PATH", "INGESTION_STATUS",
-            "DATE_CREATED", "DATE_INGESTED", "ERROR_DETAILS", "INGESTED_ROW_COUNT",
-            "UPDATED_BY", "WARNING_DETAILS"]
+    # schema = ["FILE_DETAILS_ID", "FILE_NAME", "FILE_PATH", "INGESTION_STATUS",
+    #         "DATE_CREATED", "DATE_INGESTED", "ERROR_DETAILS", "INGESTED_ROW_COUNT",
+    #         "UPDATED_BY", "WARNING_DETAILS"]
     file_name = ntpath.basename(file_path)
     error_details = ""
     error_found = False
+    updated_by=snowflake_session.sql("SELECT CURRENT_USER").collect()
+    updated_by = f"{updated_by}".split("=")[1].strip("')]'")
+
     # file key will be in the response if copy into command is executed
     if 'file' in ingestion_details:
         if ingestion_details['first_error']:
@@ -108,16 +128,56 @@ def update_file_ingestion_details(snowflake_session, file_details_id, file_path,
         rows_loaded = 0
         error_details = ingestion_details.get('error_details','')
         error_found = True
-    data = (file_details_id, file_name, file_path, status,
-        str(datetime.now()), str(datetime.now()), error_details, rows_loaded,
-        '', '')
-    query = f"""insert into {DATABASE}.{SCHEMA}.FILE_INGESTION_DETAILS
-                ({','.join(schema)}) values {str(data)}
-            """
+    # data = (file_details_id, file_name, file_path, status,
+    #     str(datetime.now()), str(datetime.now()), error_details, rows_loaded,
+    #     '', '')
+    # query = f"""insert into {DATABASE}.{SCHEMA}.FILE_INGESTION_DETAILS
+    #             ({','.join(schema)}) values {str(data)}
+    #         """
+    query=f"""UPDATE {DATABASE}.{SCHEMA}.FILE_INGESTION_DETAILS 
+          SET FILE_DETAILS_ID = '{file_details_id}',
+          FILE_NAME = '{file_name}',
+          FILE_PATH = '{file_path}',
+          INGESTION_STATUS = '{status}',
+          DATE_INGESTED = '{str(datetime.now())}',
+          ERROR_DETAILS = '{error_details}',
+          INGESTED_ROW_COUNT = '{rows_loaded}',
+          UPDATED_BY = '{updated_by}',
+          WARNING_DETAILS = '' 
+          WHERE DATE_CREATED = (SELECT MAX(DATE_CREATED) FROM {DATABASE}.{SCHEMA}.FILE_INGESTION_DETAILS)"""
+
     resp = snowflake_session.sql(query).collect()
     print(resp)
     return error_found
+def update_bronze_to_sliver_details(snowflake_session,target_table):
+    error_found = False
+    updated_by=snowflake_session.sql("SELECT CURRENT_USER").collect()
+    updated_by = f"{updated_by}".split("=")[1].strip("')]'")
 
+    query=f"""INSERT INTO SAMPLE_DB.PUBLIC.BRONZE_TO_SILVER_DETAILS
+            (FILE_INGESTION_DETAILS_ID,
+            SOURCE_SCHEMA,SOURCE_TABLE,
+            SOURCE_LOAD_DATE,
+            ERROR_DETAILS,
+            START_DATE,
+            END_DATE,
+            UPDATED_BY,
+            TRANSFORMATION_STATUS)
+            SELECT FILE_INGESTION_DETAILS_ID,
+            '{DATABASE}.{SCHEMA}' AS SOURCE_SCHEMA,
+            '{target_table}' AS SOURCE_TABLE,
+            DATE_INGESTED AS SOURCE_LOAD_DATE,
+            ERROR_DETAILS,
+            CURRENT_TIMESTAMP() AS DATE_CREATED,
+            CURRENT_TIMESTAMP() AS DATE_UPDATED,
+            '{updated_by}' AS UPDATED_BY,
+            'PENDING' AS TRANSFORMATION_STATUS
+            FROM FILE_INGESTION_DETAILS
+            WHERE INGESTION_STATUS = 'LOADED' AND DATE_INGESTED = (SELECT MAX(DATE_INGESTED) FROM FILE_INGESTION_DETAILS)"""
+    resp = snowflake_session.sql(query).collect()
+    print(resp)
+    return error_found    
+    
 def add_columns(snowflake_session, target_table, columns):
     columns_dtype = ','.join([f"{col} VARCHAR" for col in columns])
     snowflake_session.sql(f"alter table {target_table} add {columns_dtype}").collect()
@@ -199,20 +259,22 @@ def move_blob(azure_connection, context, src_file_path, error_found):
     # Copies file to target file path
     # Deletes the source file
     container_name = context["params"]["container_name"]
-    archive_folder = context["params"]["archive_folder"]
-    error_folder = context["params"]["error_folder"]
+    archive_folder = 'ARCHIVE'
+    error_folder = 'ERROR'
     customer_id = context["params"]["customer_id"]
     blob_service_client, azure_session, account_name, sas = azure_connection
     src_file = ntpath.basename(src_file_path)
     datetime_now = datetime.now()
     src_file_split = src_file.split('.')
     src_file = f"{src_file_split[0]}_{datetime_now.strftime('%H%m%S%f')}.{src_file_split[-1]}"
+    # src_file = f"{src_file_split[0]}_{str(datetime_now.year)}_{str(datetime_now.month)}.{src_file_split[-1]}"
+
     if error_found:
         target_file_path = f"{error_folder}/{str(customer_id)}/{str(datetime_now.year)}_{str(datetime_now.month)}/{src_file}"
     # elif status == "LOADED":
     #     target_file_path = f"{archive_folder}/{str(customer_id)}/{str(datetime_now.year)}/{src_file}"
     else:
-        target_file_path = f"{archive_folder}/{str(customer_id)}/{str(datetime_now.year)}/{src_file}"
+        target_file_path = f"{archive_folder}/{str(customer_id)}/{str(datetime_now.year)}_{str(datetime_now.month)}/{src_file}"
     copy_blob(blob_service_client, account_name, container_name,
               src_file_path, sas, target_file_path)
     del_blob(blob_service_client, container_name, src_file_path)
@@ -305,6 +367,7 @@ def copy_into_snowflake(snowflake_session, file_dict, src_file_name, data, root_
     # use COPY INTO to load data into snowflake
     field_delimiter = file_dict.get('field_delimiter')
     file_wild_card_ext = file_dict.get('file_wild_card_ext')
+    record_delimiter=file_dict.get('record_delimiter')
     table_name = f"{file_dict.get('target_db')}.{file_dict.get('target_schema')}.{file_dict.get('target_table')}".upper()
     src_file = src_file_name.replace(f"{root_folder}/","")
     if 'txt' or 'csv' in file_wild_card_ext.lower():
@@ -325,20 +388,71 @@ def copy_into_snowflake(snowflake_session, file_dict, src_file_name, data, root_
     print(response)
     return response
 
-def process(**context):
-    # Main function
+
+# Main function
     # Iterates over FILE_DETIALS records
     # Gets pattern matched files and respective file columns
     # Checks if schema dirft is present
     # Uses COPY INTO to snowflake
     # Updates FILE_INGESTION_DETAILS table
+# def process(**context):
+    
+#     try:
+#         container_name = context["params"]["container_name"]
+#         snowflake_session = get_snowflake_connection()
+#         azure_connection = get_azure_connection(container_name)
+#         df_file_details = get_file_details(snowflake_session, context['params']["customer_id"])
+#         print(context['params'])
+#         # for target_table, df_file_details in pd_df_file_details:
+#         for ind in df_file_details.index:
+#             try:
+#                 file_dict = {}
+#                 file_dict['file_details_id'] = int(df_file_details['FILE_DETAILS_ID'][ind])
+#                 file_dict['customer_id'] = int(df_file_details['CUSTOMER_ID'][ind])
+#                 file_dict['file_name_pattern'] = df_file_details['FILE_NAME_PATTERN'][ind]
+#                 file_dict['file_wild_card_ext'] = df_file_details['FILE_WILD_CARD_EXT'][ind]
+#                 file_dict['field_delimiter'] = df_file_details['FIELD_DELIMITER'][ind]
+#                 file_dict['record_delimiter'] = df_file_details['RECORD_DELIMITER'][ind]
+#                 file_dict['contains_header_row'] = df_file_details['CONTAINS_HEADER_ROW'][ind]
+#                 file_dict['target_table'] = df_file_details['TARGET_TABLE'][ind]
+#                 file_dict['target_db'] = df_file_details['TARGET_DB'][ind]
+#                 file_dict['target_schema'] = df_file_details['TARGET_SCHEMA'][ind]
+#                 blob_list = read_blob(azure_connection, file_dict, container_name, context)
+#                 for item in blob_list:
+#                     blob_i, file_columns = item
+#                     if not file_columns:
+#                         continue
+#                     created, table_columns = get_or_create_target_table(
+#                         snowflake_session, file_dict, file_columns)
+#                     handle_schema_drift, columns_zip = check_schema_drift(
+#                         snowflake_session, file_dict, created, file_columns, table_columns)
+#                     if handle_schema_drift:
+#                         error_found=insert_file_ingestion_details(snowflake_session, blob_i)
+#                         response = copy_into_snowflake(
+#                             snowflake_session, file_dict, blob_i, columns_zip,
+#                             context['params']["root_folder"])
+#                     else:
+#                         response = {'status': 'ERROR',
+#                                     'error_details': 'Cannot Handle Schema Drift without Header Row'}
+                    
+#                     error_found = update_file_ingestion_details(
+#                         snowflake_session, file_dict['file_details_id'],
+#                         blob_i, response, handle_schema_drift)
+                    
+#                     error_found = update_bronze_to_sliver_details(snowflake_session,file_dict['target_table'])
+#                     move_blob(azure_connection, context, blob_i, error_found)
+#             except Exception as e:
+#                 print(e)
+#     except Exception as e:
+#         print(e)
+def process(**context):
     try:
         container_name = context["params"]["container_name"]
         snowflake_session = get_snowflake_connection()
         azure_connection = get_azure_connection(container_name)
         df_file_details = get_file_details(snowflake_session, context['params']["customer_id"])
         print(context['params'])
-        # for target_table, df_file_details in pd_df_file_details:
+        
         for ind in df_file_details.index:
             try:
                 file_dict = {}
@@ -352,30 +466,44 @@ def process(**context):
                 file_dict['target_table'] = df_file_details['TARGET_TABLE'][ind]
                 file_dict['target_db'] = df_file_details['TARGET_DB'][ind]
                 file_dict['target_schema'] = df_file_details['TARGET_SCHEMA'][ind]
-                blob_list = read_blob(azure_connection, file_dict, container_name, context)
-                for item in blob_list:
-                    blob_i, file_columns = item
-                    if not file_columns:
-                        continue
-                    created, table_columns = get_or_create_target_table(
-                        snowflake_session, file_dict, file_columns)
-                    handle_schema_drift, columns_zip = check_schema_drift(
-                        snowflake_session, file_dict, created, file_columns, table_columns)
-                    if handle_schema_drift:
-                        response = copy_into_snowflake(
-                            snowflake_session, file_dict, blob_i, columns_zip,
-                            context['params']["root_folder"])
-                    else:
-                        response = {'status': 'ERROR',
-                                    'error_details': 'Cannot Handle Schema Drift without Header Row'}
-                    error_found = update_file_ingestion_details(
-                        snowflake_session, file_dict['file_details_id'],
-                        blob_i, response, handle_schema_drift)
-                    move_blob(azure_connection, context, blob_i, error_found)
+                
+                # blob_list = read_blob(azure_connection, file_dict, container_name, context)
+                # print(blob_list)
+                handle_blob_list(snowflake_session, azure_connection, context, file_dict,container_name)
+                
             except Exception as e:
                 print(e)
     except Exception as e:
         print(e)
+        
+
+def handle_blob_list(snowflake_session, azure_connection, context, file_dict,container_name):
+    blob_list = read_blob(azure_connection, file_dict, container_name, context)
+    for item in blob_list:
+        blob_i, file_columns = item
+        if not file_columns:
+            continue
+        created, table_columns = get_or_create_target_table(
+            snowflake_session, file_dict, file_columns)
+        handle_schema_drift, columns_zip = check_schema_drift(
+            snowflake_session, file_dict, created, file_columns, table_columns)
+        error_found=insert_file_ingestion_details(snowflake_session, blob_i)
+        if handle_schema_drift:
+            response = copy_into_snowflake(
+                snowflake_session, file_dict, blob_i, columns_zip,
+                context['params']["root_folder"])
+        else:
+            response = {'status': 'ERROR',
+                        'error_details': 'Cannot Handle Schema Drift without Header Row'}
+
+        error_found = update_file_ingestion_details(
+            snowflake_session, file_dict['file_details_id'],
+            blob_i, response, handle_schema_drift)
+
+        error_found = update_bronze_to_sliver_details(snowflake_session,file_dict['target_table'])
+        move_blob(azure_connection, context, blob_i, error_found)
+        
+
 
 default_args = {
     'owner': 'airflow',
@@ -404,14 +532,14 @@ with DAG(
             default='cont-datalink-dp-shared',
             type=["string"]
         ),
-        "error_folder" :Param(
-            default='ERROR',
-            type=["string"]
-        ),
-        "archive_folder" :Param(
-            default='ARCHIVE',
-            type=["string"]
-        ),
+        # "error_folder" :Param(
+        #     default='ERROR',
+        #     type=["string"]
+        # ),
+        # "archive_folder" :Param(
+        #     default='ARCHIVE',
+        #     type=["string"]
+        # ),
         "root_folder" :Param(
             default='LANDING',
             type=["string"]
@@ -423,5 +551,10 @@ with DAG(
         task_id='Process_Files_ADLS_Snowflake',
         python_callable=process
     )
+    # handle_blob_list_task = PythonOperator(
+    #     task_id='handle_blob_list_task',
+    #     python_callable=handle_blob_list
+    # )
 
-Process_Files_ADLS_Snowflake
+Process_Files_ADLS_Snowflake 
+
