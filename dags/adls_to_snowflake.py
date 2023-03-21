@@ -19,8 +19,6 @@ import json
 # Snowflake configuration
 DATABASE = "DEV_OPS_DB"
 SCHEMA = "CONFIG"
-SILVER_DATABASE = "DEV_BCBSAR_BASE_DB"
-SILVER_SCHEMA = "BASE_RAW"
 STAGE_NAME = 'DEV_BCBSAR_RAW_DB.PUBLIC.DATALINK_DP_AZURE_RAWFILE_STAGE'
 META_DATA_COLUMNS = ['FILENAME', 'FILE_ROW_NUMBER']
 LOAD_DATE = 'LOAD_DATE'
@@ -124,6 +122,7 @@ def update_file_ingestion_details(snowflake_session, file_details_id, file_path,
         status = "FAILED"
         rows_loaded = 0
         error_details = ingestion_details['status']
+        error_found = True
     # if schema drift cannot be handled
     else:
         status = ingestion_details['status']
@@ -137,7 +136,7 @@ def update_file_ingestion_details(snowflake_session, file_details_id, file_path,
     # update FILE_INGESTION_DETAILS table
     if status == "LOADED":
         status = SUCCESS
-    elif status == "LOAD_FAILED":
+    elif status in ("LOAD_FAILED", "ERROR"):
         status = FAILED
     query=f"""UPDATE {DATABASE}.{SCHEMA}.FILE_INGESTION_DETAILS
           SET FILE_DETAILS_ID = '{file_details_id}',
@@ -149,7 +148,7 @@ def update_file_ingestion_details(snowflake_session, file_details_id, file_path,
           INGESTED_ROW_COUNT = '{rows_loaded}',
           UPDATED_BY = '{updated_by}',
           WARNING_DETAILS = '',
-          SCHEMA_DRIFT_COLUMNS = {schema_drift_columns_str}
+          SCHEMA_DRIFT_COLUMNS = '{schema_drift_columns_str}'
           WHERE START_DATE = to_timestamp('{load_timestamp}')
           """
     resp = snowflake_session.sql(query).collect()
@@ -163,7 +162,7 @@ def update_bronze_to_sliver_details(snowflake_session, target_table,
     updated_by=snowflake_session.sql("SELECT CURRENT_USER").collect()
     updated_by = f"{updated_by}".split("=")[1].strip("')]'")
 
-    query=f"""INSERT INTO {SILVER_DATABASE}.{SILVER_SCHEMA}.BRONZE_TO_SILVER_DETAILS
+    query=f"""INSERT INTO {DATABASE}.{SCHEMA}.BRONZE_TO_SILVER_DETAILS
             (FILE_INGESTION_DETAILS_ID,
             SOURCE_SCHEMA,SOURCE_TABLE,
             SOURCE_LOAD_DATE,
@@ -401,7 +400,7 @@ def copy_into_snowflake(snowflake_session, file_dict, src_file_name, data,
     print(response)
     return response
 
-def handle_blob_list(snowflake_session, azure_connection, context, file_dict,container_name):
+def handle_blob_list(snowflake_session, azure_connection, context, file_dict, container_name):
     # main function
     # iterates over FILE_DETIALS records
     # gets pattern matched files and respective file columns
@@ -409,30 +408,42 @@ def handle_blob_list(snowflake_session, azure_connection, context, file_dict,con
     # uses COPY INTO to snowflake
     # updates FILE_INGESTION_DETAILS table
     # updates BRONZE_TO_SILVER_DETAILS table
+
     blob_list = read_blob(azure_connection, file_dict, container_name, context)
+    load_timestamp = ""
     for item in blob_list:
-        blob_i, file_columns = item
-        if not file_columns:
-            continue
-        created, table_columns = get_or_create_target_table(
-            snowflake_session, file_dict, file_columns)
-        handle_schema_drift, columns_zip, schema_drift_columns = check_schema_drift(
-            snowflake_session, file_dict, created, file_columns, table_columns)
-        file_name, load_timestamp = insert_file_ingestion_details(snowflake_session, blob_i)
-        if handle_schema_drift:
-            response = copy_into_snowflake(
-                snowflake_session, file_dict, blob_i, columns_zip,
-                context['params']["root_folder"], load_timestamp)
-        else:
-            response = {'status': 'ERROR',
-                        'error_details': 'Cannot Handle Schema Drift without Header Row'}
-        error_found = update_file_ingestion_details(
-            snowflake_session, file_dict['file_details_id'],
-            blob_i, response, handle_schema_drift, schema_drift_columns,
-            file_name, load_timestamp)
-        error_found = update_bronze_to_sliver_details(snowflake_session, file_dict['target_table'],
-                                                      file_name, load_timestamp)
-        move_blob(azure_connection, context, blob_i, error_found)
+        try:
+            blob_i, file_columns = item
+            if not file_columns:
+                continue
+            created, table_columns = get_or_create_target_table(
+                snowflake_session, file_dict, file_columns)
+            handle_schema_drift, columns_zip, schema_drift_columns = check_schema_drift(
+                snowflake_session, file_dict, created, file_columns, table_columns)
+            file_name, load_timestamp = insert_file_ingestion_details(snowflake_session, blob_i)
+            if handle_schema_drift:
+                response = copy_into_snowflake(
+                    snowflake_session, file_dict, blob_i, columns_zip,
+                    context['params']["root_folder"], load_timestamp)
+            else:
+                response = {'status': 'ERROR',
+                            'error_details': 'Cannot Handle Schema Drift without Header Row'}
+            error_found = update_file_ingestion_details(
+                snowflake_session, file_dict['file_details_id'],
+                blob_i, response, handle_schema_drift, schema_drift_columns,
+                file_name, load_timestamp)
+            if not error_found:
+                update_bronze_to_sliver_details(snowflake_session, file_dict['target_table'],
+                                                        file_name, load_timestamp)
+            move_blob(azure_connection, context, blob_i, error_found)
+        except Exception as e:
+            if load_timestamp:
+                update_file_ingestion_details(
+                    snowflake_session, file_dict['file_details_id'],
+                    blob_i, {"status": "ERROR", "error_details": str(e)},
+                    handle_schema_drift, schema_drift_columns,
+                    file_name, load_timestamp)
+            print(e)
 
 def process(**context):
     try:
