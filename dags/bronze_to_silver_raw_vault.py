@@ -1,5 +1,5 @@
 from airflow import DAG
-from airflow.operators.python_operator import PythonOperator
+from airflow.operators.python import PythonOperator
 from airflow.models.param import Param
 from snowflake.snowpark import Session
 from snowflake.snowpark.functions import col
@@ -7,6 +7,32 @@ from azure.identity import DefaultAzureCredential, AzureCliCredential
 from azure.keyvault.secrets import SecretClient
 from datetime import datetime, timedelta
 import json
+import hashlib
+from airflow.utils.task_group import TaskGroup
+
+# Key vault configuration
+KEYVAULT_URI = 'https://kv-datalink-dp-pilot.vault.azure.net'
+
+
+default_args = {
+    'owner': 'airflow',
+    'depends_on_past': False,
+    'start_date': datetime(2023, 3, 14),
+    'retries': 0,
+    'retry_delay': timedelta(minutes=5)
+}
+
+dag = DAG(
+    'Transformation_dag_parallel',
+    default_args=default_args,
+    catchup=False,
+    schedule_interval=None,
+    max_active_tasks=5,
+    params={
+        'database': 'SAMPLE_DB',
+        'schema': 'PUBLIC',
+    }
+)
 
 
 # Constants
@@ -25,13 +51,13 @@ def get_kv_secret(secret_name):
     fetched_secret = kv_client.get_secret(secret_name)
     return fetched_secret.value
 
-def get_snowflake_connection(database, schema):
+def get_snowflake_connection():
     # connects to snowflake and return snowpark session
     snowflake_connection_parameters = json.loads(get_kv_secret("SnowflakeSecret"))
     user = snowflake_connection_parameters.pop("username")
     snowflake_connection_parameters.update({
-        "database": database,
-        "schema": schema,
+        "database": dag.params.get('database'),
+        "schema": dag.params.get('schema'),
         "user": user
     })
     # create session using snowflake connector
@@ -145,7 +171,7 @@ def get_deleted_columns(snowflake_session, file_ing_dtls_id):
         deleted_columns = json.loads(schema_drift_cols).get('deleted_columns')
     return deleted_columns
 
-def transformation(snowflake_session, brnz_slvr_dtls_dict, db, schema):
+def transformation(snowflake_session, brnz_slvr_dtls_dict):
     # Refers STM_BRONZE_TO_SILVER table with Config data to get Columns
     # Creates Object Construct if OBJECT_CONSTRUCT_COLUMN is present
     # Insert records into repsective HUB, Satellite and Link tables
@@ -157,6 +183,9 @@ def transformation(snowflake_session, brnz_slvr_dtls_dict, db, schema):
         brnz_slvr_dtls_id = brnz_slvr_dtls_dict['brnz_slvr_dtls_id']
         trans_status = "FAILED"
         error_details = ""
+        db=dag.params.get('database')
+        schema=dag.params.get('schema')
+        
         update_brnz_slvr_details(snowflake_session, brnz_slvr_dtls_id,
                                  db, schema, "IN_PROGRESS", error_details,
                                  f", START_DATE = to_timestamp('{str(datetime.now())}')")
@@ -232,24 +261,6 @@ def transformation(snowflake_session, brnz_slvr_dtls_dict, db, schema):
                                  db, schema, trans_status, error_details,
                                  f", END_DATE = to_timestamp('{str(datetime.now())}')")
 
-def process(**context):
-    # Main function
-    # Gets Config details of PENDING records from BRONZE_TO_SILVER_DETAILS table
-    try:
-        db = context['params']['database']
-        schema = context['params']['schema']
-        snowflake_session = get_snowflake_connection(db, schema)
-        pd_brnz_slvr_dtls = get_brnz_slvr_details(snowflake_session)
-        for ind in pd_brnz_slvr_dtls.index:
-            brnz_slvr_dtls_dict = {}
-            brnz_slvr_dtls_dict['source_schema'] = pd_brnz_slvr_dtls['SOURCE_SCHEMA'][ind]
-            brnz_slvr_dtls_dict['source_table'] = pd_brnz_slvr_dtls['SOURCE_TABLE'][ind]
-            brnz_slvr_dtls_dict['src_ld_dt'] = pd_brnz_slvr_dtls['SOURCE_LOAD_DATE'][ind]
-            brnz_slvr_dtls_dict['file_ing_dtls_id'] = pd_brnz_slvr_dtls['FILE_INGESTION_DETAILS_ID'][ind]
-            brnz_slvr_dtls_dict['brnz_slvr_dtls_id'] = pd_brnz_slvr_dtls['BRONZE_TO_SILVER_DETAILS_ID'][ind]
-            transformation(snowflake_session, brnz_slvr_dtls_dict, db, schema)
-    except Exception as e:
-        print(e)
 
 
 default_args = {
@@ -262,27 +273,43 @@ default_args = {
     'retry_delay': timedelta(minutes=1),
 }
 
-with DAG(
-    dag_id='transform_bronze_to_silver',
-    default_args=default_args,
-    description='A DAG to process data from Snowflake Bronze to Silver Raw Vault',
-    schedule_interval=timedelta(days=30),
-    catchup=False,
-    params={
-        "database" :Param(
-            default='DEV_OPS_DB',
-            type=["string"]
-        ),
-        "schema" :Param(
-            default='CONFIG',
-            type=["string"]
-        ),
-    }
-)as dag:
-
-    transform_bronze_to_silver = PythonOperator(
-        task_id='transform_bronze_to_silver',
-        python_callable=process
-    )
-
-transform_bronze_to_silver
+snowflake_session=get_snowflake_connection()
+pd_brnz_slvr_dtls=get_brnz_slvr_details(snowflake_session)
+with TaskGroup(group_id='transform' , dag= dag) as transform:
+    for ind in pd_brnz_slvr_dtls.index:
+        brnz_slvr_dtls_dict = {}
+        brnz_slvr_dtls_dict['source_schema'] = pd_brnz_slvr_dtls['SOURCE_SCHEMA'][ind]
+        brnz_slvr_dtls_dict['source_table'] = pd_brnz_slvr_dtls['SOURCE_TABLE'][ind]
+        brnz_slvr_dtls_dict['src_ld_dt'] = pd_brnz_slvr_dtls['SOURCE_LOAD_DATE'][ind]
+        brnz_slvr_dtls_dict['file_ing_dtls_id'] = pd_brnz_slvr_dtls['FILE_INGESTION_DETAILS_ID'][ind]
+        brnz_slvr_dtls_dict['brnz_slvr_dtls_id'] = pd_brnz_slvr_dtls['BRONZE_TO_SILVER_DETAILS_ID'][ind]
+        task_id = f"transformation_bronze_to_silver_{brnz_slvr_dtls_dict['brnz_slvr_dtls_id']}"
+        print(task_id)
+        transformation_operator = PythonOperator(
+            task_id=task_id,
+            python_callable=transformation,
+            op_kwargs={'snowflake_session':snowflake_session,
+                    'brnz_slvr_dtls_dict':brnz_slvr_dtls_dict},
+            dag=dag
+        )
+        transform
+        
+        
+# def process(**context):
+#     # Main function
+#     # Gets Config details of PENDING records from BRONZE_TO_SILVER_DETAILS table
+#     try:
+#         db = context['params']['database']
+#         schema = context['params']['schema']
+#         snowflake_session = get_snowflake_connection(db, schema)
+#         pd_brnz_slvr_dtls = get_brnz_slvr_details(snowflake_session)
+#         for ind in pd_brnz_slvr_dtls.index:
+#             brnz_slvr_dtls_dict = {}
+#             brnz_slvr_dtls_dict['source_schema'] = pd_brnz_slvr_dtls['SOURCE_SCHEMA'][ind]
+#             brnz_slvr_dtls_dict['source_table'] = pd_brnz_slvr_dtls['SOURCE_TABLE'][ind]
+#             brnz_slvr_dtls_dict['src_ld_dt'] = pd_brnz_slvr_dtls['SOURCE_LOAD_DATE'][ind]
+#             brnz_slvr_dtls_dict['file_ing_dtls_id'] = pd_brnz_slvr_dtls['FILE_INGESTION_DETAILS_ID'][ind]
+#             brnz_slvr_dtls_dict['brnz_slvr_dtls_id'] = pd_brnz_slvr_dtls['BRONZE_TO_SILVER_DETAILS_ID'][ind]
+#             transformation(snowflake_session, brnz_slvr_dtls_dict, db, schema)
+#     except Exception as e:
+#         print(e)
