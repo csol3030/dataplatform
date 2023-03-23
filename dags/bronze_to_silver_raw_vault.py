@@ -295,6 +295,9 @@ with TaskGroup(group_id='transform' , dag= dag) as transform:
         transform
         
         
+        
+        
+        
 # def process(**context):
 #     # Main function
 #     # Gets Config details of PENDING records from BRONZE_TO_SILVER_DETAILS table
