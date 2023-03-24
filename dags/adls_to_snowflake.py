@@ -1,6 +1,7 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.models.param import Param
+from airflow.utils.task_group import TaskGroup
 from snowflake.snowpark import Session
 from snowflake.snowpark.functions import col
 from snowflake.snowpark.types import StructType, StructField, StringType, IntegerType, TimestampType
@@ -14,8 +15,6 @@ import fnmatch
 import re
 import ntpath
 import json
-from airflow.utils.task_group import TaskGroup
-
 
 
 
@@ -94,8 +93,8 @@ def insert_file_ingestion_details(snowflake_session, file_path):
     return file_name, load_timestamp
 
 def update_file_ingestion_details(snowflake_session, file_details_id, file_path,
-                                  ingestion_details, handle_schema_drift, schema_drift_columns,
-                                  file_name, load_timestamp):
+                                  ingestion_details, handle_schema_drift,
+                                  schema_drift_columns, file_name, load_timestamp):
     # updates FILE_INGESTION_DETAILS table with status
     SUCCESS = 'SUCCESS'
     FAILED = 'FAILED'
@@ -158,12 +157,14 @@ def update_file_ingestion_details(snowflake_session, file_details_id, file_path,
     print(resp)
     return error_found
 
-def update_bronze_to_sliver_details(snowflake_session, target_table,
+def update_bronze_to_sliver_details(snowflake_session, file_dict,
                                     file_name, load_timestamp):
     # creates a record in BRONZE_TO_SILVER_DETAILS table with status as PENDING
     error_found = False
     updated_by=snowflake_session.sql("SELECT CURRENT_USER").collect()
     updated_by = f"{updated_by}".split("=")[1].strip("')]'")
+    target_schema = f"{file_dict.get('target_db')}.{file_dict.get('target_schema')}".upper()
+    target_table = file_dict.get('target_table').upper()
 
     query=f"""INSERT INTO {DATABASE}.{SCHEMA}.BRONZE_TO_SILVER_DETAILS
             (FILE_INGESTION_DETAILS_ID,
@@ -173,7 +174,7 @@ def update_bronze_to_sliver_details(snowflake_session, target_table,
             UPDATED_BY,
             TRANSFORMATION_STATUS)
             SELECT FILE_INGESTION_DETAILS_ID,
-            '{DATABASE}.{SCHEMA}' AS SOURCE_SCHEMA,
+            '{target_schema}' AS SOURCE_SCHEMA,
             '{target_table}' AS SOURCE_TABLE,
             to_timestamp('{load_timestamp}') AS SOURCE_LOAD_DATE,
             ERROR_DETAILS,
@@ -189,6 +190,7 @@ def update_bronze_to_sliver_details(snowflake_session, target_table,
     return error_found
 
 def add_columns(snowflake_session, target_table, columns):
+    # alters the target table and add's specified columns
     columns_dtype = ','.join([f"{col} VARCHAR" for col in columns])
     snowflake_session.sql(f"alter table {target_table} add {columns_dtype}").collect()
 
@@ -381,7 +383,7 @@ def copy_into_snowflake(snowflake_session, file_dict, src_file_name, data,
     # use COPY INTO to load data into snowflake
     field_delimiter = file_dict.get('field_delimiter')
     file_wild_card_ext = file_dict.get('file_wild_card_ext')
-    record_delimiter=file_dict.get('record_delimiter')
+    record_delimiter = file_dict.get('record_delimiter')
     table_name = f"{file_dict.get('target_db')}.{file_dict.get('target_schema')}.{file_dict.get('target_table')}".upper()
     src_file = src_file_name.replace(f"{root_folder}/","")
     if 'txt' or 'csv' in file_wild_card_ext.lower():
@@ -403,7 +405,7 @@ def copy_into_snowflake(snowflake_session, file_dict, src_file_name, data,
     print(response)
     return response
 
-def handle_blob_list(snowflake_session, azure_connection, file_dict,blob_i,file_columns):
+def handle_blob_list(snowflake_session, azure_connection, file_dict, blob_i, file_columns):
     # main function
     # iterates over FILE_DETIALS records
     # gets pattern matched files and respective file columns
@@ -428,18 +430,18 @@ def handle_blob_list(snowflake_session, azure_connection, file_dict,blob_i,file_
             snowflake_session, file_dict['file_details_id'],
             blob_i, response, handle_schema_drift, schema_drift_columns,
             file_name, load_timestamp)
-        error_found = update_bronze_to_sliver_details(snowflake_session, file_dict['target_table'],
-                                                        file_name, load_timestamp)
+        error_found = update_bronze_to_sliver_details(snowflake_session, file_dict,
+                                                      file_name, load_timestamp)
         move_blob(azure_connection, blob_i, error_found)
     except Exception as e:
             if load_timestamp:
+                error_message = str(e).replace("'", "")
+                error_details = f"ERROR: Could not Process File {blob_i}, {error_message}"
                 update_file_ingestion_details(
                     snowflake_session, file_dict['file_details_id'],
-                    blob_i, {"status": "ERROR", "error_details": str(e)},
+                    blob_i, {"status": "ERROR", "error_details": error_details},
                     handle_schema_drift, schema_drift_columns,
                     file_name, load_timestamp)
-            print(e)
-
 
 
 default_args = {
@@ -481,7 +483,6 @@ container_name = dag.params.get('container_name')
 snowflake_session = get_snowflake_connection()
 azure_connection = get_azure_connection(container_name)
 df_file_details = get_file_details(snowflake_session, dag.params.get('customer_id'))
-print(df_file_details)
 file_dtls_blb_lst = []
 for ind in df_file_details.index:
         file_dict = {}
@@ -497,10 +498,9 @@ for ind in df_file_details.index:
         file_dict['target_schema'] = df_file_details['TARGET_SCHEMA'][ind]
         task_id=f"handle_blob_list_{file_dict['file_details_id']}"
         blob_list = read_blob(azure_connection, file_dict, container_name)
-        print(blob_list)
         if blob_list:
             file_dtls_blb_lst.append((blob_list, file_dict))
-    
+
 
 with TaskGroup(group_id='Process_Files', dag=dag) as Process_Files:
     for blob_list, file_dict in file_dtls_blb_lst:

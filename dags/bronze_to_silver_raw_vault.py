@@ -1,6 +1,7 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.models.param import Param
+from airflow.utils.task_group import TaskGroup
 from snowflake.snowpark import Session
 from snowflake.snowpark.functions import col
 from azure.identity import DefaultAzureCredential, AzureCliCredential
@@ -8,10 +9,6 @@ from azure.keyvault.secrets import SecretClient
 from datetime import datetime, timedelta
 import json
 import hashlib
-from airflow.utils.task_group import TaskGroup
-
-# Key vault configuration
-KEYVAULT_URI = 'https://kv-datalink-dp-pilot.vault.azure.net'
 
 
 default_args = {
@@ -43,6 +40,11 @@ REC_SRC = "REC_SRC"
 # Key vault configuration
 KEYVAULT_URI = 'https://kv-datalink-dp-pilot.vault.azure.net'
 
+def print_log(title, data, status):
+    print("-----"*2+title)
+    print(data)
+    print(status)
+    print("-----"*2)
 
 def get_kv_secret(secret_name):
     # connect to Azure Key vault and returns the specified secret value
@@ -74,8 +76,9 @@ def insert_into_table(snowflake_session, target_table, source_table, source_colu
                         select {source_columns_str} from {source_table}
                         where {LOAD_DATE_COLUMN}=to_timestamp('{load_date}')
                         """
+    print(insert_into_str)
     resp_insert_into = snowflake_session.sql(insert_into_str).collect()
-    print(resp_insert_into)
+    print_log(f"insert_into_table | {target_table}", resp_insert_into, "")
     return resp_insert_into
 
 def update_brnz_slvr_details(snowflake_session, brnz_slvr_dtls_id, db, schema,
@@ -87,26 +90,28 @@ def update_brnz_slvr_details(snowflake_session, brnz_slvr_dtls_id, db, schema,
                 where BRONZE_TO_SILVER_DETAILS_ID = {brnz_slvr_dtls_id}
             """
     resp = snowflake_session.sql(query).collect()
-    print(resp)
+    print_log(f"update_brnz_slvr_details | {db}.{schema}.BRONZE_TO_SILVER_DETAILS",
+               resp, status)
 
 def create_brnz_slvr_step_details(snowflake_session, brnz_slvr_dtls_id, file_ing_dtls_id,
                                   db, schema, target_schema, target_table):
     updated_by = snowflake_session.sql("SELECT CURRENT_USER").collect()
     updated_by = f"{updated_by}".split("=")[1].strip("')]'")
+    created_date = str(datetime.now())
     table_schema = ["BRONZE_TO_SILVER_DETAILS_ID", "FILE_INGESTION_DETAILS_ID",
-        "TARGET_SCHEMA", "TARGET_TABLE", "START_DATE", "STATUS", "UPDATED_BY"]
-    start_date = str(datetime.now())
-    data = (brnz_slvr_dtls_id, file_ing_dtls_id, target_schema, target_table,
-            start_date, "PENDING", updated_by)
+        "TARGET_SCHEMA", "TARGET_TABLE", "STATUS", "CREATED_DATE", "UPDATED_BY"]
+    data = (brnz_slvr_dtls_id, file_ing_dtls_id, target_schema,
+            target_table, "PENDING", created_date, updated_by)
     query = f"""insert into {db}.{schema}.BRONZE_TO_SILVER_STEP_DETAILS
                 ({','.join(table_schema)}) values {str(data)}
             """
     resp = snowflake_session.sql(query).collect()
-    print(resp)
-    return start_date
+    print_log(f"create_brnz_slvr_step_details | {db}.{schema}.BRONZE_TO_SILVER_STEP_DETAILS",
+               resp, target_table)
+    return created_date
 
 def update_brnz_slvr_step_details(snowflake_session, brnz_slvr_dtls_id, file_ing_dtls_id,
-                                  db, schema, target_schema, target_table,
+                                  db, schema, target_schema, target_table, created_date,
                                   status, error_details, date_update_str):
     query=f"""UPDATE {db}.{schema}.BRONZE_TO_SILVER_STEP_DETAILS
           SET STATUS = '{status}',
@@ -115,9 +120,11 @@ def update_brnz_slvr_step_details(snowflake_session, brnz_slvr_dtls_id, file_ing
           AND TARGET_TABLE = '{target_table}'
           AND BRONZE_TO_SILVER_DETAILS_ID = '{brnz_slvr_dtls_id}'
           AND FILE_INGESTION_DETAILS_ID = '{file_ing_dtls_id}'
+          AND CREATED_DATE = {created_date}
           """
     resp = snowflake_session.sql(query).collect()
-    print(resp)
+    print_log(f"update_brnz_slvr_step_details | {db}.{schema}.BRONZE_TO_SILVER_STEP_DETAILS",
+               resp, f"{target_table}\n{status}")
 
 def get_brnz_slvr_details(snowflake_session):
     # Fetch PENDING status records from BRONZE_TO_SILVER_DETAILS Config table
@@ -183,9 +190,9 @@ def transformation(snowflake_session, brnz_slvr_dtls_dict):
         brnz_slvr_dtls_id = brnz_slvr_dtls_dict['brnz_slvr_dtls_id']
         trans_status = "FAILED"
         error_details = ""
-        db=dag.params.get('database')
-        schema=dag.params.get('schema')
-        
+        db = dag.params.get('database')
+        schema = dag.params.get('schema')
+
         update_brnz_slvr_details(snowflake_session, brnz_slvr_dtls_id,
                                  db, schema, "IN_PROGRESS", error_details,
                                  f", START_DATE = to_timestamp('{str(datetime.now())}')")
@@ -197,18 +204,20 @@ def transformation(snowflake_session, brnz_slvr_dtls_dict):
         lst_brnz_slvr_step_dtls = []
         for stm_details_grp, stm_dtls in stm_details_df:
             target_schema, target_table = stm_details_grp
-            lst_brnz_slvr_step_dtls.append((target_schema, target_table, stm_dtls))
-            create_brnz_slvr_step_details(snowflake_session, brnz_slvr_dtls_id, file_ing_dtls_id,
-                                      db, schema, target_schema, target_table)
-        for target_schema, target_table, stm_dtls in lst_brnz_slvr_step_dtls:
+            created_date = create_brnz_slvr_step_details(snowflake_session, brnz_slvr_dtls_id,
+                                                       file_ing_dtls_id, db, schema,
+                                                       target_schema, target_table)
+            lst_brnz_slvr_step_dtls.append((target_schema, target_table, stm_dtls, created_date))
+        for target_schema, target_table, stm_dtls, created_date in lst_brnz_slvr_step_dtls:
             try:
+                step_start_date = str(datetime.now())
+                step_status = "FAILED"
+                step_error_details = ""
                 update_brnz_slvr_step_details(snowflake_session,
                                             brnz_slvr_dtls_id, file_ing_dtls_id,
                                             db, schema, target_schema, target_table,
-                                            "IN_PROGRESS", "",
-                                            f", START_DATE=to_timestamp('{str(datetime.now())}')")
-                step_status = "FAILED"
-                step_error_details = ""
+                                            f"to_timestamp('{created_date}')", "IN_PROGRESS", "",
+                                            f", START_DATE=to_timestamp('{step_start_date}')")
                 source_columns, target_columns, source_column_fn = zip(*stm_dtls[
                     ['SOURCE_COLUMN', 'TARGET_COLUMN', 'SOURCE_COLUMN_FN']].values.tolist())
                 source_columns = list(source_columns)
@@ -226,7 +235,7 @@ def transformation(snowflake_session, brnz_slvr_dtls_dict):
                 if LOAD_DATE_COLUMN in target_columns:
                     source_columns[target_columns.index(LOAD_DATE_COLUMN)] = f"to_timestamp('{str(datetime.now())}')"
                 for indx, item in enumerate(source_column_fn):
-                    if item:
+                    if item and item.upper() != 'NULL':
                         source_columns[indx] = source_column_fn[indx]
                 source_table_path = f"{source_schema}.{source_table}"
                 target_table_path = f"{target_schema}.{target_table}"
@@ -238,30 +247,31 @@ def transformation(snowflake_session, brnz_slvr_dtls_dict):
                         inserted_count += 1
                         step_status = "SUCCESS"
                 if step_status == "FAILED":
-                    step_error_details = f"ERROR: Couldn't Update {target_schema}.{target_table}"
+                    step_error_details = f"ERROR: Could not Update {target_schema}.{target_table}"
             except Exception as e:
                 step_status == "FAILED"
-                step_error_details = f"ERROR: Couldn't Update {target_schema}.{target_table}, {str(e)}"
+                step_message = str(e).replace("'", "")
+                step_error_details = f"ERROR: Could not Update {target_schema}.{target_table}, {step_message}"
             finally:
                 update_brnz_slvr_step_details(snowflake_session,
                                             brnz_slvr_dtls_id, file_ing_dtls_id,
                                             db, schema, target_schema, target_table,
-                                            step_status, step_error_details,
+                                            f"to_timestamp('{created_date}')", step_status,
+                                            step_error_details,
                                             f", END_DATE=to_timestamp('{str(datetime.now())}')")
         if inserted_count and inserted_count == to_be_inserted_count:
             trans_status = "SUCCESS"
         else:
             trans_status = "FAILED"
-            error_details = "Couldn't Udpdate Mapped Target Tables"
+            error_details = "Could not Update Mapped Target Table(s)"
     except Exception as e:
         trans_status = "FAILED"
-        error_details = f"ERROR: Couldn't Udpdate Mapped Target Tables, {str(e)}"
+        trans_message = str(e).replace("'", "")
+        error_details = f"ERROR: {trans_message}"
     finally:
         update_brnz_slvr_details(snowflake_session, brnz_slvr_dtls_id,
                                  db, schema, trans_status, error_details,
                                  f", END_DATE = to_timestamp('{str(datetime.now())}')")
-
-
 
 default_args = {
     'owner': 'airflow',
@@ -273,8 +283,8 @@ default_args = {
     'retry_delay': timedelta(minutes=1),
 }
 
-snowflake_session=get_snowflake_connection()
-pd_brnz_slvr_dtls=get_brnz_slvr_details(snowflake_session)
+snowflake_session = get_snowflake_connection()
+pd_brnz_slvr_dtls = get_brnz_slvr_details(snowflake_session)
 with TaskGroup(group_id='transform' , dag= dag) as transform:
     for ind in pd_brnz_slvr_dtls.index:
         brnz_slvr_dtls_dict = {}
@@ -288,10 +298,13 @@ with TaskGroup(group_id='transform' , dag= dag) as transform:
         transformation_operator = PythonOperator(
             task_id=task_id,
             python_callable=transformation,
-            op_kwargs={'snowflake_session':snowflake_session,
-                    'brnz_slvr_dtls_dict':brnz_slvr_dtls_dict},
+            op_kwargs={
+            'snowflake_session':snowflake_session,
+            'brnz_slvr_dtls_dict':brnz_slvr_dtls_dict
+            },
             dag=dag
         )
+<<<<<<< HEAD
         transform
         
         
@@ -316,3 +329,6 @@ with TaskGroup(group_id='transform' , dag= dag) as transform:
 #             transformation(snowflake_session, brnz_slvr_dtls_dict, db, schema)
 #     except Exception as e:
 #         print(e)
+=======
+        transform
+>>>>>>> 2c2e1189beab8a5b78955fa1ca55f5c573225223
