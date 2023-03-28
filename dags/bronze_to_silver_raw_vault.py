@@ -335,6 +335,7 @@ dag = DAG(
     params={
         'database': 'DEV_OPS_DB',
         'schema': 'CONFIG',
+        'run_failed': False
     }
 )
 
