@@ -3,13 +3,19 @@ from airflow.operators.python import PythonOperator
 from airflow.models.param import Param
 from airflow.utils.task_group import TaskGroup
 from snowflake.snowpark import Session
-from snowflake.snowpark.functions import col
+from snowflake.snowpark.functions import col, lit
 from azure.identity import DefaultAzureCredential, AzureCliCredential
 from azure.keyvault.secrets import SecretClient
 from datetime import datetime, timedelta
 import json
 
+# Tables
+BRONZE_TO_SILVER_STEP_DETAILS = "BRONZE_TO_SILVER_STEP_DETAILS"
+BRONZE_TO_SILVER_DETAILS = "BRONZE_TO_SILVER_DETAILS"
+STM_BRONZE_TO_SILVER = "STM_BRONZE_TO_SILVER"
+
 # Constants
+FILE_INGESTION_DETAILS = "FILE_INGESTION_DETAILS"
 OBJECT_CONSTRUCT_COLUMN = "ADDITIONAL_DETAILS"
 LOAD_DATE_COLUMN = "LOAD_DATE"
 REC_SRC = "REC_SRC"
@@ -61,7 +67,7 @@ def insert_into_table(snowflake_session, target_table, source_table, source_colu
 def update_brnz_slvr_details(snowflake_session, brnz_slvr_dtls_id, db, schema,
                              status, error_details, date_update_str):
     # Update STATUS and TIMESTAMP in BRONZE_TO_SILVER_DETAILS
-    query = f"""update {db}.{schema}.BRONZE_TO_SILVER_DETAILS
+    query = f"""update {db}.{schema}.{BRONZE_TO_SILVER_DETAILS}
                 set TRANSFORMATION_STATUS = '{status}'{date_update_str},
                 ERROR_DETAILS = '{error_details}'
                 where BRONZE_TO_SILVER_DETAILS_ID = {brnz_slvr_dtls_id}
@@ -79,7 +85,7 @@ def create_brnz_slvr_step_details(snowflake_session, brnz_slvr_dtls_id, file_ing
         "TARGET_SCHEMA", "TARGET_TABLE", "STATUS", "CREATED_DATE", "UPDATED_BY"]
     data = (brnz_slvr_dtls_id, file_ing_dtls_id, target_schema,
             target_table, "PENDING", created_date, updated_by)
-    query = f"""insert into {db}.{schema}.BRONZE_TO_SILVER_STEP_DETAILS
+    query = f"""insert into {db}.{schema}.{BRONZE_TO_SILVER_STEP_DETAILS}
                 ({','.join(table_schema)}) values {str(data)}
             """
     resp = snowflake_session.sql(query).collect()
@@ -90,7 +96,7 @@ def create_brnz_slvr_step_details(snowflake_session, brnz_slvr_dtls_id, file_ing
 def update_brnz_slvr_step_details(snowflake_session, brnz_slvr_dtls_id, file_ing_dtls_id,
                                   db, schema, target_schema, target_table, created_date,
                                   status, error_details, date_update_str):
-    query=f"""UPDATE {db}.{schema}.BRONZE_TO_SILVER_STEP_DETAILS
+    query=f"""UPDATE {db}.{schema}.{BRONZE_TO_SILVER_STEP_DETAILS}
           SET STATUS = '{status}',
           ERROR_DETAILS = '{error_details}'{date_update_str}
           where TARGET_SCHEMA = '{target_schema}'
@@ -103,30 +109,15 @@ def update_brnz_slvr_step_details(snowflake_session, brnz_slvr_dtls_id, file_ing
     print_log(f"update_brnz_slvr_step_details | {db}.{schema}.BRONZE_TO_SILVER_STEP_DETAILS",
                resp, f"{target_table}\n{status}")
 
-def get_brnz_slvr_details(snowflake_session):
-    # Fetch PENDING status records from BRONZE_TO_SILVER_DETAILS Config table
-    brnz_slvr_details = snowflake_session.table("BRONZE_TO_SILVER_DETAILS").filter(
-        col("TRANSFORMATION_STATUS")=="PENDING")
-    pd_df_brnz_slvr_dtls = brnz_slvr_details.to_pandas()
-    return pd_df_brnz_slvr_dtls
-
-def get_stm_brnz_slvr_details(snowflake_session, source_schema, source_table):
-    # Fetch records from STM_BRONZE_TO_SILVER table
-    # Group by TARGET_SCHEMA, TARGET_TABLE
-    stm_details = snowflake_session.table("STM_BRONZE_TO_SILVER").filter(
-        (col("SOURCE_SCHEMA")==source_schema) & (col("SOURCE_TABLE")==source_table)
-        # & (col("TARGET_TABLE") == "LINK_MEMBER_CLAIM")
-        )
-    pd_df_stm_details = stm_details.to_pandas()
-    pd_df_stm_details_grp = pd_df_stm_details.groupby(["TARGET_SCHEMA", "TARGET_TABLE"])
-    return pd_df_stm_details_grp
-
-def get_file_ingestion_details(snowflake_session, file_ing_dtls_id):
-    # Get FILE_INGESTION_DETAILS record based on FILE_INGESTION_DETAILS_ID
-    file_ing_dtls = snowflake_session.table("FILE_INGESTION_DETAILS").filter(
-        col("FILE_INGESTION_DETAILS_ID") == file_ing_dtls_id)
-    file_ing_dtls = file_ing_dtls.to_pandas()
-    return file_ing_dtls
+def get_table_records(snowflake_session, table, filter_dict=None, group_by=None):
+    query = snowflake_session.table(table)
+    if filter_dict:
+        for column, value in filter_dict.items():
+            query = query.filter(col(column) == lit(value))
+    data = query.to_pandas()
+    if group_by:
+        data = data.groupby(group_by)
+    return data
 
 def get_unmapped_columns(snowflake_session, deleted_columns, source_schema,
                          source_table, source_target_zip, source_config_columns):
@@ -146,7 +137,9 @@ def get_unmapped_columns(snowflake_session, deleted_columns, source_schema,
 
 def get_deleted_columns(snowflake_session, file_ing_dtls_id):
     # Get deleted columns from FILE_INGESTION_DETAILS (SCHEMA_DRIFT_COLUMNS)
-    file_ing_dtls = get_file_ingestion_details(snowflake_session, file_ing_dtls_id)
+    file_ing_dtls = get_table_records(snowflake_session, FILE_INGESTION_DETAILS, filter_dict={
+                                        "FILE_INGESTION_DETAILS_ID": file_ing_dtls_id
+                                      })
     if file_ing_dtls.empty:
         return list()
     deleted_columns = []
@@ -155,7 +148,7 @@ def get_deleted_columns(snowflake_session, file_ing_dtls_id):
         deleted_columns = json.loads(schema_drift_cols).get('deleted_columns')
     return deleted_columns
 
-def transformation(brnz_slvr_dtls_dict):
+def transformation(snowflake_session, brnz_slvr_dtls_dict, step_query_dict):
     # Refers STM_BRONZE_TO_SILVER table with Config data to get Columns
     # Creates Object Construct if OBJECT_CONSTRUCT_COLUMN is present
     # Insert records into repsective HUB, Satellite and Link tables
@@ -173,18 +166,43 @@ def transformation(brnz_slvr_dtls_dict):
         update_brnz_slvr_details(snowflake_session, brnz_slvr_dtls_id,
                                  db, schema, "IN_PROGRESS", error_details,
                                  f", START_DATE = to_timestamp('{str(datetime.now())}')")
-        stm_details_df = get_stm_brnz_slvr_details(snowflake_session, source_schema, source_table)
-        file_ing_dtls_id = int(file_ing_dtls_id)
+
+        # stm_details_df = get_stm_brnz_slvr_details(snowflake_session, source_schema, source_table)
+        stm_details_df = get_table_records(snowflake_session, STM_BRONZE_TO_SILVER, filter_dict={
+                            "SOURCE_SCHEMA": source_schema,
+                            "SOURCE_TABLE": source_table
+                          }, group_by=["TARGET_SCHEMA", "TARGET_TABLE"])
+
         deleted_columns = get_deleted_columns(snowflake_session, file_ing_dtls_id)
+
+        file_ing_dtls_id = int(file_ing_dtls_id)
         to_be_inserted_count = len(stm_details_df)
         inserted_count = 0
         lst_brnz_slvr_step_dtls = []
+
         for stm_details_grp, stm_dtls in stm_details_df:
             target_schema, target_table = stm_details_grp
-            created_date = create_brnz_slvr_step_details(snowflake_session, brnz_slvr_dtls_id,
-                                                       file_ing_dtls_id, db, schema,
-                                                       target_schema, target_table)
+            if dag.params.get('run_failed') or dag.params.get('run'):
+                step_query_dict.update({
+                    "FILE_INGESTION_DETAILS_ID": file_ing_dtls_id,
+                    "TARGET_SCHEMA": target_schema,
+                    "TARGET_TABLE": target_table,
+                    "BRONZE_TO_SILVER_DETAILS_ID": brnz_slvr_dtls_id,
+                })
+                step_query_dict.update(dag.params.get('run', dict()))
+                step_details = get_table_records(snowflake_session, BRONZE_TO_SILVER_STEP_DETAILS,
+                                                 filter_dict=step_query_dict)
+                if step_details.empty:
+                    to_be_inserted_count -= 1
+                    continue
+                else:
+                    created_date = str(step_details['CREATED_DATE'][0])
+            else:
+                created_date = create_brnz_slvr_step_details(snowflake_session, brnz_slvr_dtls_id,
+                                                    file_ing_dtls_id, db, schema, target_schema,
+                                                    target_table)
             lst_brnz_slvr_step_dtls.append((target_schema, target_table, stm_dtls, created_date))
+
         for target_schema, target_table, stm_dtls, created_date in lst_brnz_slvr_step_dtls:
             try:
                 step_start_date = str(datetime.now())
@@ -241,14 +259,60 @@ def transformation(brnz_slvr_dtls_dict):
         else:
             trans_status = "FAILED"
             error_details = "Could not Update Mapped Target Table(s)"
+
     except Exception as e:
         trans_status = "FAILED"
         trans_message = str(e).replace("'", "")
         error_details = f"ERROR: {trans_message}"
+
     finally:
         update_brnz_slvr_details(snowflake_session, brnz_slvr_dtls_id,
                                  db, schema, trans_status, error_details,
                                  f", END_DATE = to_timestamp('{str(datetime.now())}')")
+
+
+def get_query_filter_dict():
+    trans_query_dict = dict()
+    step_query_dict = dict()
+    if dag.params.get('run_failed'):
+        trans_query_dict = {'TRANSFORMATION_STATUS': 'FAILED'}
+        step_query_dict = {'STATUS': 'FAILED'}
+    elif dag.params.get('run'):
+        run = dag.params.get('run')
+        trans_query_dict = {
+            'TRANSFORMATION_STATUS': run.get('TRANSFORMATION_STATUS'),
+            'BRONZE_TO_SILVER_DETAILS_ID': run.get('BRONZE_TO_SILVER_DETAILS_ID'),
+            }
+        step_query_dict = {
+            'TARGET_TABLE': run.get('TARGET_TABLE'),
+            'BRONZE_TO_SILVER_STEP_ID': run.get('BRONZE_TO_SILVER_STEP_ID')
+            }
+    else:
+        trans_query_dict = {'TRANSFORMATION_STATUS': 'PENDING'}
+    return trans_query_dict, step_query_dict
+
+def process():
+    try:
+        # initiates snowflake connection
+        # iterates over BRONZE_SILVER_DETIALS table
+        snowflake_session = get_snowflake_connection()
+        trans_query_dict, step_query_dict = get_query_filter_dict()
+        pd_brnz_slvr_dtls = get_table_records(snowflake_session, 'BRONZE_TO_SILVER_DETAILS',
+                                      filter_dict=trans_query_dict)
+        bronze_slvr_dtls=[]
+        for ind in pd_brnz_slvr_dtls.index:
+                brnz_slvr_dtls_dict = {}
+                brnz_slvr_dtls_dict['source_schema'] = pd_brnz_slvr_dtls['SOURCE_SCHEMA'][ind]
+                brnz_slvr_dtls_dict['source_table'] = pd_brnz_slvr_dtls['SOURCE_TABLE'][ind]
+                brnz_slvr_dtls_dict['src_ld_dt'] = pd_brnz_slvr_dtls['SOURCE_LOAD_DATE'][ind]
+                brnz_slvr_dtls_dict['file_ing_dtls_id'] = int(pd_brnz_slvr_dtls['FILE_INGESTION_DETAILS_ID'][ind])
+                brnz_slvr_dtls_dict['brnz_slvr_dtls_id'] = int(pd_brnz_slvr_dtls['BRONZE_TO_SILVER_DETAILS_ID'][ind])
+                bronze_slvr_dtls.append(brnz_slvr_dtls_dict)
+        return snowflake_session, bronze_slvr_dtls, step_query_dict
+    except Exception as e:
+        error_message = str(e).replace("'", "")
+        print(f"ERROR: {error_message}")
+
 
 default_args = {
     'owner': 'airflow',
@@ -274,24 +338,12 @@ dag = DAG(
     }
 )
 
-snowflake_session = get_snowflake_connection()
-pd_brnz_slvr_dtls = get_brnz_slvr_details(snowflake_session)
-bronze_slvr_dtls=[]
+
+snowflake_session, bronze_slvr_dtls, step_query_dict = process()
+
 with TaskGroup(group_id='transform' , dag= dag) as transform:
-    for ind in pd_brnz_slvr_dtls.index:
-        brnz_slvr_dtls_dict = {}
-        brnz_slvr_dtls_dict['source_schema'] = pd_brnz_slvr_dtls['SOURCE_SCHEMA'][ind]
-        brnz_slvr_dtls_dict['source_table'] = pd_brnz_slvr_dtls['SOURCE_TABLE'][ind]
-        brnz_slvr_dtls_dict['src_ld_dt'] = pd_brnz_slvr_dtls['SOURCE_LOAD_DATE'][ind]
-        brnz_slvr_dtls_dict['file_ing_dtls_id'] = pd_brnz_slvr_dtls['FILE_INGESTION_DETAILS_ID'][ind]
-        brnz_slvr_dtls_dict['brnz_slvr_dtls_id'] = pd_brnz_slvr_dtls['BRONZE_TO_SILVER_DETAILS_ID'][ind]       
-        bronze_slvr_dtls.append([brnz_slvr_dtls_dict])
-        
     transformation_operator = PythonOperator.partial(
         task_id='transformation_bronze_to_silver',
         python_callable=transformation,
-        
         dag=dag
     ).expand(op_args=bronze_slvr_dtls)
-    
-    
