@@ -388,13 +388,15 @@ def copy_into_snowflake(snowflake_session, file_dict, src_file_name, data,
     src_file = src_file_name.replace(f"{root_folder}/","")
     if 'txt' or 'csv' in file_wild_card_ext.lower():
         file_wild_card_ext = 'CSV'
+    if '{CR}{LF}' in record_delimiter:
+        record_delimiter = '\r\n'
     indexes, columns = map(list, zip(*data))
     columns.extend(META_DATA_COLUMNS+[LOAD_DATE])
     indexes_str = ','.join(['t.$'+str(ind) if str(ind)!="" else 'NULL' for ind in indexes])
     indexes_str = indexes_str + ',' + ','.join([f"METADATA${col}" for col in META_DATA_COLUMNS])
     indexes_str = indexes_str + ',' + f"'{load_timestamp}'"
     columns_str = ','.join([col for col in columns])
-    file_format_str = f'type = {file_wild_card_ext} field_delimiter = "{field_delimiter}" EMPTY_FIELD_AS_NULL = False '
+    file_format_str = f'type = {file_wild_card_ext} field_delimiter = "{field_delimiter}" record_delimiter = "{record_delimiter}" EMPTY_FIELD_AS_NULL = False '
     if file_dict.get('contains_header_row'):
         file_format_str = file_format_str + ' SKIP_HEADER = 1'
     copy_into_str = f"""copy into {table_name} ({columns_str}) from (select {indexes_str}
@@ -405,7 +407,7 @@ def copy_into_snowflake(snowflake_session, file_dict, src_file_name, data,
     print(response)
     return response
 
-def handle_blob_list(snowflake_session, azure_connection, file_dict, blob_i, file_columns):
+def handle_blob_list(snowflake_session,azure_connection,file_dict, blob_i, file_columns):
     # main function
     # iterates over FILE_DETIALS records
     # gets pattern matched files and respective file columns
@@ -484,41 +486,32 @@ snowflake_session = get_snowflake_connection()
 azure_connection = get_azure_connection(container_name)
 df_file_details = get_file_details(snowflake_session, dag.params.get('customer_id'))
 file_dtls_blb_lst = []
+blob_i_col_lst=[]
 for ind in df_file_details.index:
-        file_dict = {}
-        file_dict['file_details_id'] = int(df_file_details['FILE_DETAILS_ID'][ind])
-        file_dict['customer_id'] = int(df_file_details['CUSTOMER_ID'][ind])
-        file_dict['file_name_pattern'] = df_file_details['FILE_NAME_PATTERN'][ind]
-        file_dict['file_wild_card_ext'] = df_file_details['FILE_WILD_CARD_EXT'][ind]
-        file_dict['field_delimiter'] = df_file_details['FIELD_DELIMITER'][ind]
-        file_dict['record_delimiter'] = df_file_details['RECORD_DELIMITER'][ind]
-        file_dict['contains_header_row'] = df_file_details['CONTAINS_HEADER_ROW'][ind]
-        file_dict['target_table'] = df_file_details['TARGET_TABLE'][ind]
-        file_dict['target_db'] = df_file_details['TARGET_DB'][ind]
-        file_dict['target_schema'] = df_file_details['TARGET_SCHEMA'][ind]
-        task_id=f"handle_blob_list_{file_dict['file_details_id']}"
-        blob_list = read_blob(azure_connection, file_dict, container_name)
-        if blob_list:
-            file_dtls_blb_lst.append((blob_list, file_dict))
-
+    file_dict = {}
+    file_dict['file_details_id'] = int(df_file_details['FILE_DETAILS_ID'][ind])
+    file_dict['customer_id'] = int(df_file_details['CUSTOMER_ID'][ind])
+    file_dict['file_name_pattern'] = df_file_details['FILE_NAME_PATTERN'][ind]
+    file_dict['file_wild_card_ext'] = df_file_details['FILE_WILD_CARD_EXT'][ind]
+    file_dict['field_delimiter'] = df_file_details['FIELD_DELIMITER'][ind]
+    file_dict['record_delimiter'] = df_file_details['RECORD_DELIMITER'][ind]
+    file_dict['contains_header_row'] = df_file_details['CONTAINS_HEADER_ROW'][ind]
+    file_dict['target_table'] = df_file_details['TARGET_TABLE'][ind]
+    file_dict['target_db'] = df_file_details['TARGET_DB'][ind]
+    file_dict['target_schema'] = df_file_details['TARGET_SCHEMA'][ind]
+    blob_list = read_blob(azure_connection, file_dict, container_name)
+    if blob_list:
+        file_dtls_blb_lst.append((blob_list, file_dict))
 
 with TaskGroup(group_id='Process_Files', dag=dag) as Process_Files:
     for blob_list, file_dict in file_dtls_blb_lst:
-        for blob_index,blob_i_col in enumerate(blob_list,start=1):
+        for blob_index,blob_i_col in enumerate(blob_list):
             blob_i,file_columns=blob_i_col
             if not file_columns:
                 continue
-            task_id="Process_File_{0}_{1}".format(blob_index,file_dict['file_details_id'])
-            copy_into_operator = PythonOperator(
-                task_id=task_id,
-                python_callable=handle_blob_list,
-                op_kwargs={
-                    'snowflake_session': snowflake_session,
-                    'azure_connection': azure_connection,
-                    'file_dict': file_dict,
-                    'blob_i': blob_i,
-                    'file_columns': file_columns
-                },
-                dag=dag
-            )
-            Process_Files
+            blob_i_col_lst.append((blob_i, file_columns, file_dict))
+    handle_blob_list_operator = PythonOperator.partial(
+        task_id='Process_Files',
+        python_callable=handle_blob_list,
+        dag=dag
+    ).expand(op_args=[(snowflake_session, azure_connection, file_dict, blob_i, file_columns) for blob_i, file_columns, file_dict  in blob_i_col_lst])
