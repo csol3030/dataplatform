@@ -195,12 +195,9 @@ def transformation(snowflake_session, brnz_slvr_dtls_dict, step_query_dict):
                 if step_details.empty:
                     to_be_inserted_count -= 1
                     continue
-                else:
-                    created_date = str(step_details['CREATED_DATE'][0])
-            else:
-                created_date = create_brnz_slvr_step_details(snowflake_session, brnz_slvr_dtls_id,
-                                                    file_ing_dtls_id, db, schema, target_schema,
-                                                    target_table)
+            created_date = create_brnz_slvr_step_details(snowflake_session, brnz_slvr_dtls_id,
+                                                file_ing_dtls_id, db, schema, target_schema,
+                                                target_table)
             lst_brnz_slvr_step_dtls.append((target_schema, target_table, stm_dtls, created_date))
 
         for target_schema, target_table, stm_dtls, created_date in lst_brnz_slvr_step_dtls:
