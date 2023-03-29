@@ -1,0 +1,8 @@
+local:
+  registry: localhost:5555
+project:
+  name: astro-airflow
+show_warnings: "true"
+upgrade_message: "true"
+webserver:
+  port: "8081"
