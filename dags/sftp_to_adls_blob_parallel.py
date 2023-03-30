@@ -6,35 +6,32 @@ from datetime import datetime
 
 from airflow import DAG
 from airflow import settings
+from airflow.decorators import task
 from airflow.utils.task_group import TaskGroup
 from airflow.utils.db import provide_session
 from airflow.models import Connection, XCom
 from airflow.models.param import Param
+from airflow.models.xcom_arg import XComArg
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.providers.snowflake.hooks.snowflake import SnowflakeHook
-from airflow.operators.python import PythonOperator
+from airflow.operators.python import (
+    PythonOperator,
+    BranchPythonOperator,
+    get_current_context,
+)
 from azure.identity import AzureCliCredential
 from azure.keyvault.secrets import SecretClient
 from azure.storage.blob import BlobServiceClient, BlobClient, BlobBlock
 
-# TENANT_ID = '18c3b4f7-e526-4f98-939a-19118361cac0'
 KEYVAULT_URI = "https://kv-datalink-dp-pilot.vault.azure.net"
 KEYVAULT_ADLS_BLOB_SECRET = "ADLSBlobConnSTR"
 KEYVAULT_SNOWFLAKE_SECRET = "SnowflakeSecret"
-# KEYVAULT_SFTP_SECRET = "SFTPSecret"
 
 ADLS_CONN_ID = "datalink_adls_conn"
 SNOWFLAKE_CONN_ID = "datalink_snowflake_conn"
-# SFTP_CONN_ID = "datalink_sftp_conn"
-
-# ADLS_HOST_NAME = "https://dlsdatalinkdppilot.blob.core.windows.net"
-# AZURE_CONTAINER_NAME = "cont-datalink-dp-shared/TEMP"
-# BLOB_PREFIX = ""
-# SFTP_SRC_PATH = "./*Sample.txt"
-# SFTP_SRC_PATH = "/member*"
 
 ENV_ID = "DEV"
-DAG_ID = "af_transfer_files_sftp_to_adls"
+DAG_ID = "af_sftp_to_adls_parallel_test"
 
 default_args = {
     "owner": "Airflow User",
@@ -255,27 +252,26 @@ def upload_file_async(
         except Exception as e:
             print("Exception := ", e)
         finally:
-            
             print(
                 "done uploading zip data files",
                 filename,
                 round(time.time() - start_time, ndigits=3),
             )
-
             try:
                 os.remove(filename)
                 print("% s removed successfully" % filename)
             except OSError as error:
                 print(error)
                 print("File path can not be removed")
-            
         # loop.close()
-        # sftp_client.close()
-        # transport.close()
+        sftp_client.close()
+        transport.close()
 
 
-def transfer_files_sftp_azure(data, params):
+def parse_config_data(data, params):
     file_info_arr = []
+    file_info_path = []
+
     for index, row in data:
         print("row", index, row, params)
         if "KV_PWD_KEY" in row.keys():
@@ -287,77 +283,125 @@ def transfer_files_sftp_azure(data, params):
             dir_info = [x.filename for x in sftp_client.listdir_iter()]
             file_list = fnmatch.filter(dir_info, SFTP_FILE)
 
-            print("pattern == ", SFTP_FILE, dir_info, "\n result", file_list)
             for item in file_list:
+                blob_name = (
+                    params["dest_folder_name"]
+                    + "/"
+                    + str(params["customer_id"])
+                    + "/"
+                    + str(item)
+                )
+                print(blob_name)
+                details = {
+                    "dest_container_name": params["dest_container_name"],
+                    "blob_name": blob_name,
+                    "filename": item,
+                    "kv_secret": row["KV_PWD_KEY"],
+                    "sftp_obj": None,
+                    "file_ext": row["FILE_WILD_CARD_EXT"],
+                }
+                # details = json.dumps(details)
+                # file_info_path.append(blob_name)
+                file_info_arr.append([details])
 
-                if row["FILE_WILD_CARD_EXT"].find("zip") > -1:
-                    with sftp_client.open(filename=item) as zip_file_data:
-                        zip_obj = zipfile.ZipFile(zip_file_data)
-                        folder_id = str(uuid.uuid4())
-                        path = "/home/astro/airflow/zipfiles"+folder_id
-                        
-                        zip_obj.extractall(path)
-                    
-                    file_details = []
-                    for current_dir, dirs, files in os.walk(path):
-                        print("current_dir", current_dir)
-                        print("dirs", dirs)
-                        print("files", files)
-                        file_details = [(i, os.path.join(current_dir, i)) for i in files]
+            sftp_client.close()
+            transport.close()
 
+    # print("file_info_arr ================", file_info_arr)
+    # print("file_info_path ================", file_info_path)
+    # print("file_info_path ================", fnmatch.filter(file_info_path,"*.zip"))
+    # print("file_info_path ================", fnmatch.filter(file_info_path,"*.txt"))
 
-                    for file_item in file_details:
-                        blob_name = (
-                            params["dest_folder_name"]
-                            + "/"
-                            + str(params["customer_id"])
-                            + "/"
-                            + str(file_item[0])
-                        )
-                        print(blob_name)
-                        details = {
-                            "dest_container_name": params["dest_container_name"],
-                            "blob_name": blob_name,
-                            "filename": file_item[1],
-                            "kv_secret": row["KV_PWD_KEY"],
-                            "sftp_obj": None,
-                            "file_ext": row["FILE_WILD_CARD_EXT"],
-                            "zip_path":path
-                        }
-                        file_info_arr.append([details])
-
-                    print("List of Files in zip ", file_info_arr)
-
-                else:
-                    blob_name = (
-                        params["dest_folder_name"]
-                        + "/"
-                        + str(params["customer_id"])
-                        + "/"
-                        + str(item)
-                    )
-                    print(blob_name)
-                    details = {
-                        "dest_container_name": params["dest_container_name"],
-                        "blob_name": blob_name,
-                        "filename": item,
-                        "kv_secret": row["KV_PWD_KEY"],
-                        "sftp_obj": None,
-                        "file_ext": row["FILE_WILD_CARD_EXT"],
-                    }
-                    # details = json.dumps(details)
-                    file_info_arr.append([details])
-                # upload_file_async(params["dest_container_name"], blob_name, item, kv_secret, (sftp_client, transport))
-                print("file ", blob_name, "processed")
-
-    print("file_info_arr ================", file_info_arr)
     return file_info_arr
 
-def process_zip_files():
-    pass
 
-def process_text_files():
-    pass
+def extract_zip_files(details, **context):
+    print(
+        "===================extract_zip_files==============",
+        details,
+        "\n\n\n",
+        context["params"],
+    )
+    contextParams = context["params"]
+    file_info_arr = []
+
+    if details["file_ext"].find("zip") > -1:
+        sftp_client, transport = get_sftp_conn_config(details["kv_secret"])
+
+        with sftp_client.open(filename=details["filename"]) as zip_file_data:
+            zip_obj = zipfile.ZipFile(zip_file_data)
+            folder_id = str(uuid.uuid4())
+            path = "/home/astro/airflow/zipfiles/" + folder_id
+
+            zip_obj.extractall(path)
+
+        file_details = []
+        for current_dir, dirs, files in os.walk(path):
+            print("current_dir", current_dir)
+            print("dirs", dirs)
+            print("files", files)
+            print("path", path)
+            file_details = [(i, os.path.join(current_dir, i)) for i in files]
+
+        for file_item in file_details:
+            blob_name = (
+                contextParams["dest_folder_name"]
+                + "/"
+                + str(contextParams["customer_id"])
+                + "/"
+                + str(file_item[0])
+            )
+            print(blob_name)
+            details = {
+                "dest_container_name": details["dest_container_name"],
+                "blob_name": blob_name,
+                "filename": file_item[1],
+                "kv_secret": details["kv_secret"],
+                "sftp_obj": None,
+                "file_ext": details["file_ext"],
+            }
+
+            # file_info_arr.append({details["filename"]: details})
+            file_info_arr.append(details)
+
+        sftp_client.close()
+        transport.close()
+
+        print("List of Files in zip ", file_info_arr)
+
+    return file_info_arr
+
+
+def get_zip_file_info(**context):
+
+    ti = context["ti"]
+    details = ti.xcom_pull(
+        key="return_value",
+        task_ids="upload_sftp_to_azure.upload_zip_files.extract_zip_files",
+    )
+
+    file_list = []
+    for item in details:
+        if type(item) == list:
+            for val in item:
+                file_list.append([val])
+        else:
+            file_list.append([item])  
+    
+    # print("get_zip_file_info", type(details), file_list)
+    return file_list
+
+
+def process_config_data(**context):
+    ti = context["ti"]
+    file_ext = context["file_ext"]
+    data = ti.xcom_pull(key="return_value", task_ids="get_snowflake_config_data")
+    print("===================data==============", data)
+    details = [item for item in data if item[0]["file_ext"] == file_ext]
+    print(details)
+    print("op_args=====", file_ext)
+    return details
+
 
 def upload_data_azure(details, **context):
     print("===================upload_data_azure==============", details)
@@ -373,6 +417,7 @@ def upload_data_azure(details, **context):
     )
 
 
+
 def get_snowflake_config_data(**context):
     print(context["snowflake_sql"])
     query = context["snowflake_sql"]
@@ -380,14 +425,12 @@ def get_snowflake_config_data(**context):
     # result = snf_hook.get_records(query)
     df = snf_hook.get_pandas_df(query)
 
-    # for index, row in df.iterrows():
-    #     transfer_files_sftp_azure(row,context["params"])
-
     print("Result Rows  - %s", len(df))
     print("Result Type  - ", type(df))
     print("Result - \n", df)
 
-    file_result = transfer_files_sftp_azure(df.iterrows(), context["params"])
+    # file_result = transfer_files_sftp_azure(df.iterrows(), context["params"])
+    file_result = parse_config_data(df.iterrows(), context["params"])
 
     print("file_result =========================================", file_result)
 
@@ -430,6 +473,7 @@ def create_connection():
         .filter(Connection.conn_id == SNOWFLAKE_CONN_ID)
         .first()
     )
+
     adls_conn_obj = (
         session.query(Connection).filter(Connection.conn_id == ADLS_CONN_ID).first()
     )
@@ -508,12 +552,52 @@ with DAG(
         },
     )
 
-    upload_data_sftp_to_azure = PythonOperator.partial(
-        task_id="upload_data_sftp_to_azure", python_callable=upload_data_azure
-    ).expand(op_args=get_config_data_snowflake.output)
+    with TaskGroup(group_id="upload_sftp_to_azure") as upload_sftp_to_azure:
+
+        with TaskGroup(group_id="upload_text_files") as upload_text_files:
+
+            process_txt_config = PythonOperator(
+                task_id="process_txt_config",
+                python_callable=process_config_data,
+                op_kwargs={"file_ext":"*.txt"}
+            )
+
+            process_text_files = PythonOperator.partial(
+                task_id="process_text_files",
+                python_callable=upload_data_azure
+            ).expand(op_args=process_txt_config.output)
+
+            process_txt_config >> process_text_files
+
+        with TaskGroup(group_id="upload_zip_files") as upload_zip_files:
+           
+            process_zip_config = PythonOperator(
+                task_id="process_zip_config",
+                python_callable=process_config_data,
+                op_kwargs={"file_ext": "*.zip"},
+            )
+
+            extract_zip = PythonOperator.partial(
+                task_id="extract_zip_files",
+                python_callable=extract_zip_files,
+            ).expand(op_args=process_zip_config.output)
+
+
+            get_zip_files = PythonOperator(
+                task_id="get_zip_files",
+                python_callable=get_zip_file_info
+            )
+            
+            process_zip_text_files = PythonOperator.partial(
+                task_id="process_zip_text_files", python_callable=upload_data_azure
+            ).expand(op_args=get_zip_files.output)
+
+            process_zip_config >> extract_zip >> get_zip_files >> process_zip_text_files
+
+        # Parallel in groups
+        upload_zip_files, upload_text_files
 
     with TaskGroup(group_id="cleanup") as cleanup:
-
         del_conn = PythonOperator(
             task_id="delete_connections", python_callable=delete_connection
         )
@@ -524,7 +608,6 @@ with DAG(
             provide_context=True,
             dag=dag,
         )
-
 
     # process_files_adls_to_snowflake = TriggerDagRunOperator(
     #     task_id="process_files_adls_to_snowflake",
@@ -541,8 +624,5 @@ with DAG(
     #     # execution_date=datetime(2022,2,7)
     # )
 
-    create_conn >> get_config_data_snowflake >> upload_data_sftp_to_azure >> cleanup 
-    # >> process_files_adls_to_snowflake
-    # >>  del_conn >> clean_xcom
-    # >> upload_data_sftp_to_azure
+    create_conn >> get_config_data_snowflake >> upload_sftp_to_azure >> cleanup
     # >> process_files_adls_to_snowflake
