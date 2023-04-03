@@ -2,6 +2,7 @@ from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.models.param import Param
 from airflow.utils.task_group import TaskGroup
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from snowflake.snowpark import Session
 from snowflake.snowpark.functions import col
 from snowflake.snowpark.types import StructType, StructField, StringType, IntegerType, TimestampType
@@ -17,14 +18,12 @@ import ntpath
 import json
 
 
-
 # Snowflake configuration
 DATABASE = "DEV_OPS_DB"
 SCHEMA = "CONFIG"
 STAGE_NAME = 'DEV_BCBSAR_RAW_DB.PUBLIC.DATALINK_DP_AZURE_RAWFILE_STAGE'
 META_DATA_COLUMNS = ['FILENAME', 'FILE_ROW_NUMBER']
 LOAD_DATE = 'LOAD_DATE'
-
 # Key vault configuration
 KEYVAULT_URI = 'https://kv-datalink-dp-pilot.vault.azure.net'
 
@@ -49,7 +48,10 @@ def get_snowflake_connection():
     session = Session.builder.configs(snowflake_connection_parameters).create()
     return session
 
-def get_azure_connection(container_name):
+snowflake_session = get_snowflake_connection()
+
+def get_azure_connection(context):
+    container_name =  context["params"]["container_name"]
     # create a client to interact with blob storage
     blob_details = json.loads(get_kv_secret("ADLSBlobConnSTR"))
     connection_str = blob_details.get('connection_string')
@@ -60,6 +62,7 @@ def get_azure_connection(container_name):
     sas = connection_str.split('SharedAccessSignature=')[1]
     connection = (blob_service_client, container_client, account_name, sas)
     return connection
+
 
 def get_file_details(snowflake_session, customer_id):
     # fetch records from FILE_DETAILS Config table
@@ -207,11 +210,11 @@ def format_columns(columns):
             col_list.append(re.sub(special_char_set,"_", col).upper())
     return col_list
 
-def pattern_matching(azure_session, file_dict):
+def pattern_matching(azure_session, file_dict, context):
     # returns a list of files if file_name_pattern matches
     file_name_pattern = file_dict["file_name_pattern"]
-    customer_id = dag.params.get('customer_id')
-    root_folder = dag.params.get('root_folder')
+    customer_id = context["params"]["customer_id"]
+    root_folder = context["params"]["root_folder"]
     blob_list = []
     for blob_i in azure_session.list_blobs(name_starts_with=f"{root_folder}/{str(customer_id)}"):
         file_name = blob_i.name.lower()
@@ -227,8 +230,9 @@ def pattern_matching(azure_session, file_dict):
                     blob_list.append(blob_i.name)
     return blob_list
 
-def get_file_columns(blob_service_client, container_name, src_file_path, field_delimiter):
+def get_file_columns(blob_service_client, src_file_path, field_delimiter, context):
     # returns header rows from a file
+    container_name =  context["params"]["container_name"]
     file_columns = []
     try:
         blob_client = blob_service_client.get_blob_client(container_name, src_file_path)
@@ -244,19 +248,20 @@ def get_file_columns(blob_service_client, container_name, src_file_path, field_d
             print("File is Empty")
     return file_columns
 
-def read_blob(azure_connection, file_dict, container_name):
+def read_blob(azure_connection, file_dict, context):
     # returns a list of tupple containing file_name, file_columns and respective sas_url
     blob_service_client, azure_session, account_name, sas = azure_connection
-    blob_list = pattern_matching(azure_session, file_dict)
+    blob_list = pattern_matching(azure_session, file_dict, context)
     blob_with_sas_list = []
     for blob_i in blob_list:
-        file_columns = get_file_columns(blob_service_client, container_name,
-                                        blob_i, file_dict['field_delimiter'])
+        file_columns = get_file_columns(blob_service_client,
+                                        blob_i, file_dict['field_delimiter'], context)
         blob_with_sas_list.append((blob_i, file_columns))
     return blob_with_sas_list
 
-def copy_blob(blob_service_client, account_name, container_name,
-              src_file_path, sas, target_file_path):
+def copy_blob(blob_service_client, account_name,
+              src_file_path, sas, target_file_path, context):
+    container_name =  context["params"]["container_name"]
     # copies file to target path
     source_blob_sas = 'https://' + account_name +'.blob.core.windows.net/' + \
                       container_name + '/' + src_file_path + '?' + sas
@@ -268,13 +273,13 @@ def del_blob(blob_service_client, container_name, src_file_path):
     source_blob_client = blob_service_client.get_blob_client(container_name, src_file_path)
     source_blob_client.delete_blob()
 
-def move_blob(azure_connection, src_file_path, error_found):
+def move_blob(azure_connection, src_file_path, error_found, context):
     # copies file to target file path
     # deletes the source file
     archive_folder = 'ARCHIVE'
     error_folder = 'ERROR'
-    container_name = dag.params.get('container_name')
-    customer_id = dag.params.get('customer_id')
+    container_name =  context["params"]["container_name"]
+    customer_id =  context["params"]["customer_id"]
     blob_service_client, azure_session, account_name, sas = azure_connection
     src_file = ntpath.basename(src_file_path)
     datetime_now = datetime.now()
@@ -284,8 +289,8 @@ def move_blob(azure_connection, src_file_path, error_found):
         target_file_path = f"{error_folder}/{str(customer_id)}/{str(datetime_now.year)}_{str(datetime_now.month)}/{src_file}"
     else:
         target_file_path = f"{archive_folder}/{str(customer_id)}/{str(datetime_now.year)}_{str(datetime_now.month)}/{src_file}"
-    copy_blob(blob_service_client, account_name, container_name,
-              src_file_path, sas, target_file_path)
+    copy_blob(blob_service_client, account_name,
+              src_file_path, sas, target_file_path, context)
     del_blob(blob_service_client, container_name, src_file_path)
 
 def create_table(snowflake_session, columns, target_table):
@@ -407,7 +412,46 @@ def copy_into_snowflake(snowflake_session, file_dict, src_file_name, data,
     print(response)
     return response
 
-def handle_blob_list(snowflake_session,azure_connection,file_dict, blob_i, file_columns):
+
+def process(**context):
+    try:
+        # container_name =  context["params"]["container_name"]
+        azure_connection = get_azure_connection(context)
+        df_file_details = get_file_details(snowflake_session,  context["params"]["customer_id"])
+        file_dtls_blb_lst = []
+        for ind in df_file_details.index:
+            try:
+                file_dict = {}
+                file_dict['file_details_id'] = int(df_file_details['FILE_DETAILS_ID'][ind])
+                file_dict['customer_id'] = int(df_file_details['CUSTOMER_ID'][ind])
+                file_dict['file_name_pattern'] = df_file_details['FILE_NAME_PATTERN'][ind]
+                file_dict['file_wild_card_ext'] = df_file_details['FILE_WILD_CARD_EXT'][ind]
+                file_dict['field_delimiter'] = df_file_details['FIELD_DELIMITER'][ind]
+                file_dict['record_delimiter'] = df_file_details['RECORD_DELIMITER'][ind]
+                file_dict['contains_header_row'] = df_file_details['CONTAINS_HEADER_ROW'][ind]
+                file_dict['target_table'] = df_file_details['TARGET_TABLE'][ind]
+                file_dict['target_db'] = df_file_details['TARGET_DB'][ind]
+                file_dict['target_schema'] = df_file_details['TARGET_SCHEMA'][ind]
+                blob_list = read_blob(azure_connection, file_dict, context)
+                if blob_list:
+                    file_dtls_blb_lst.append((blob_list, file_dict))
+        
+            except Exception as e:
+                print(e)
+        blob_i_col_lst=[]
+        for blob_list, file_dict in file_dtls_blb_lst:
+            for blob_index,blob_i_col in enumerate(blob_list):
+                blob_i,file_columns=blob_i_col
+                if not file_columns:
+                    continue
+                blob_i_col_lst.append((blob_i, file_columns, file_dict))
+        ls=[(file_dict, blob_i, file_columns) for blob_i, file_columns, file_dict  in blob_i_col_lst]
+        return ls
+    except Exception as e:
+        print(e)
+        
+
+def handle_blob_list(file_dict, blob_i, file_columns, **context):
     # main function
     # iterates over FILE_DETIALS records
     # gets pattern matched files and respective file columns
@@ -415,6 +459,10 @@ def handle_blob_list(snowflake_session,azure_connection,file_dict, blob_i, file_
     # uses COPY INTO to snowflake
     # updates FILE_INGESTION_DETAILS table
     # updates BRONZE_TO_SILVER_DETAILS table
+    
+    # container_name =  context["params"]["container_name"]
+    azure_connection = get_azure_connection(context)
+    
     try:
         created, table_columns = get_or_create_target_table(
         snowflake_session, file_dict, file_columns)
@@ -424,7 +472,7 @@ def handle_blob_list(snowflake_session,azure_connection,file_dict, blob_i, file_
         if handle_schema_drift:
             response = copy_into_snowflake(
                 snowflake_session, file_dict, blob_i, columns_zip,
-                dag.params.get('root_folder'), load_timestamp)
+                 context["params"]["root_folder"], load_timestamp)
         else:
             response = {'status': 'ERROR',
                         'error_details': 'Cannot Handle Schema Drift without Header Row'}
@@ -434,7 +482,7 @@ def handle_blob_list(snowflake_session,azure_connection,file_dict, blob_i, file_
             file_name, load_timestamp)
         error_found = update_bronze_to_sliver_details(snowflake_session, file_dict,
                                                       file_name, load_timestamp)
-        move_blob(azure_connection, blob_i, error_found)
+        move_blob(azure_connection, blob_i, error_found,  context)
     except Exception as e:
             if load_timestamp:
                 error_message = str(e).replace("'", "")
@@ -444,7 +492,6 @@ def handle_blob_list(snowflake_session,azure_connection,file_dict, blob_i, file_
                     blob_i, {"status": "ERROR", "error_details": error_details},
                     handle_schema_drift, schema_drift_columns,
                     file_name, load_timestamp)
-
 
 default_args = {
     'owner': 'airflow',
@@ -456,12 +503,11 @@ default_args = {
     'retry_delay': timedelta(minutes=1),
 }
 
-dag= DAG(
-    dag_id='Process_ADLS_to_Snowflake_Parallel',
+with DAG(
+    dag_id='Process_ADLS_to_Snowflake',
     default_args=default_args,
     description='A DAG to process data stored in Azure Datalake Storage and write to Snowflake',
     schedule_interval=timedelta(days=30),
-    max_active_tasks=3,
     catchup=False,
     params={
         "customer_id":Param(
@@ -477,41 +523,43 @@ dag= DAG(
         "root_folder" :Param(
             default='LANDING',
             type=["string"]
+        ),
+        "database":Param(
+            default='DEV_OPS_DB',
+            type=["string"]
+        ),
+        "schema":Param(
+            default='CONFIG',
+            type=["string"]
+        ),
+        "run_failed":Param(
+            default=True
         )
     }
-)
+)as dag:
 
-container_name = dag.params.get('container_name')
-snowflake_session = get_snowflake_connection()
-azure_connection = get_azure_connection(container_name)
-df_file_details = get_file_details(snowflake_session, dag.params.get('customer_id'))
-file_dtls_blb_lst = []
-blob_i_col_lst=[]
-for ind in df_file_details.index:
-    file_dict = {}
-    file_dict['file_details_id'] = int(df_file_details['FILE_DETAILS_ID'][ind])
-    file_dict['customer_id'] = int(df_file_details['CUSTOMER_ID'][ind])
-    file_dict['file_name_pattern'] = df_file_details['FILE_NAME_PATTERN'][ind]
-    file_dict['file_wild_card_ext'] = df_file_details['FILE_WILD_CARD_EXT'][ind]
-    file_dict['field_delimiter'] = df_file_details['FIELD_DELIMITER'][ind]
-    file_dict['record_delimiter'] = df_file_details['RECORD_DELIMITER'][ind]
-    file_dict['contains_header_row'] = df_file_details['CONTAINS_HEADER_ROW'][ind]
-    file_dict['target_table'] = df_file_details['TARGET_TABLE'][ind]
-    file_dict['target_db'] = df_file_details['TARGET_DB'][ind]
-    file_dict['target_schema'] = df_file_details['TARGET_SCHEMA'][ind]
-    blob_list = read_blob(azure_connection, file_dict, container_name)
-    if blob_list:
-        file_dtls_blb_lst.append((blob_list, file_dict))
+    Process_Files_ADLS_Snowflake = PythonOperator(
+        task_id='Process_Files_ADLS_Snowflake',
+        python_callable=process
+    )
 
-with TaskGroup(group_id='Process_Files', dag=dag) as Process_Files:
-    for blob_list, file_dict in file_dtls_blb_lst:
-        for blob_index,blob_i_col in enumerate(blob_list):
-            blob_i,file_columns=blob_i_col
-            if not file_columns:
-                continue
-            blob_i_col_lst.append((blob_i, file_columns, file_dict))
-    handle_blob_list_operator = PythonOperator.partial(
-        task_id='Process_Files',
-        python_callable=handle_blob_list,
-        dag=dag
-    ).expand(op_args=[(snowflake_session, azure_connection, file_dict, blob_i, file_columns) for blob_i, file_columns, file_dict  in blob_i_col_lst])
+    with TaskGroup(group_id='Process_Files', dag=dag) as Process_Files:
+        
+        handle_blob_list_operator = PythonOperator.partial(
+            task_id='Process_Files',
+            python_callable=handle_blob_list,
+            dag=dag
+        ).expand(op_args=Process_Files_ADLS_Snowflake.output)
+        
+    Transformation_bronze_to_silver = TriggerDagRunOperator(
+        task_id="Transformation_bronze_to_silver",
+        trigger_dag_id="Transformation_bronze_to_silver",
+        wait_for_completion=True,
+        conf={
+            "database":"""{{params.database}}""",
+            "schema":"""{{params.schema}}""",
+            "run_failed":"""{{params.run_failed}}"""
+        }
+    )
+        
+Process_Files_ADLS_Snowflake >> handle_blob_list_operator >> Transformation_bronze_to_silver

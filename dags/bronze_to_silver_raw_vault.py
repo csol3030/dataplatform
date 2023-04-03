@@ -43,13 +43,13 @@ def get_kv_secret(secret_name):
     fetched_secret = kv_client.get_secret(secret_name)
     return fetched_secret.value
 
-def get_snowflake_connection():
+def get_snowflake_connection(context):
     # connects to snowflake and return snowpark session
     snowflake_connection_parameters = json.loads(get_kv_secret("SnowflakeSecret"))
     user = snowflake_connection_parameters.pop("username")
     snowflake_connection_parameters.update({
-        "database": dag.params.get('database'),
-        "schema": dag.params.get('schema'),
+        "database": context["params"]["database"],
+        "schema": context["params"]["schema"],
         "user": user
     })
     # create session using snowflake connector
@@ -160,10 +160,11 @@ def get_deleted_columns(snowflake_session, file_ing_dtls_id):
         deleted_columns = json.loads(schema_drift_cols).get('deleted_columns')
     return deleted_columns
 
-def transformation(snowflake_session, brnz_slvr_dtls_dict):
+def transformation(brnz_slvr_dtls_dict,**context):
     # Refers STM_BRONZE_TO_SILVER table with Config data to get Columns
     # Creates Object Construct if OBJECT_CONSTRUCT_COLUMN is present
     # Insert records into repsective HUB, Satellite and Link tables
+    snowflake_session = get_snowflake_connection(context)
     try:
         source_schema = brnz_slvr_dtls_dict['source_schema']
         source_table = brnz_slvr_dtls_dict['source_table']
@@ -172,8 +173,8 @@ def transformation(snowflake_session, brnz_slvr_dtls_dict):
         brnz_slvr_dtls_id = brnz_slvr_dtls_dict['brnz_slvr_dtls_id']
         trans_status = TransStatus.FAILED
         error_details = ""
-        db = dag.params.get('database')
-        schema = dag.params.get('schema')
+        db = context["params"]["database"]
+        schema = context["params"]["schema"]
 
         update_brnz_slvr_details(snowflake_session, brnz_slvr_dtls_id,
                                  db, schema, TransStatus.IN_PROGRESS, error_details,
@@ -284,37 +285,58 @@ def transformation(snowflake_session, brnz_slvr_dtls_dict):
                                  f", END_DATE = to_timestamp('{str(datetime.now())}')")
 
 
-def process():
+def process(context):
     try:
         # initiates snowflake connection
         # iterates over BRONZE_SILVER_DETIALS table
 
-        snowflake_session = get_snowflake_connection()
+        snowflake_session = get_snowflake_connection(context)
+        
         bronze_slvr_dtls=[]
-
+        grp_by_list=[]
         for trans_status in (TransStatus.PENDING, TransStatus.FAILED):
             try:
-                if not dag.params.get('run_failed') and trans_status == TransStatus.FAILED:
+                if not context["params"]["run_failed"] and trans_status == TransStatus.FAILED:
                     continue
                 pd_brnz_slvr_dtls = get_table_records(snowflake_session, 'BRONZE_TO_SILVER_DETAILS',
                                         filter_dict={'TRANSFORMATION_STATUS': trans_status})
                 for ind in pd_brnz_slvr_dtls.index:
-                        brnz_slvr_dtls_dict = {}
-                        brnz_slvr_dtls_dict['source_schema'] = pd_brnz_slvr_dtls['SOURCE_SCHEMA'][ind]
-                        brnz_slvr_dtls_dict['source_table'] = pd_brnz_slvr_dtls['SOURCE_TABLE'][ind]
-                        brnz_slvr_dtls_dict['src_ld_dt'] = pd_brnz_slvr_dtls['SOURCE_LOAD_DATE'][ind]
-                        brnz_slvr_dtls_dict['file_ing_dtls_id'] = int(pd_brnz_slvr_dtls['FILE_INGESTION_DETAILS_ID'][ind])
-                        brnz_slvr_dtls_dict['brnz_slvr_dtls_id'] = int(pd_brnz_slvr_dtls['BRONZE_TO_SILVER_DETAILS_ID'][ind])
-                        brnz_slvr_dtls_dict['trans_status'] = pd_brnz_slvr_dtls['TRANSFORMATION_STATUS'][ind]
-                        bronze_slvr_dtls.append(brnz_slvr_dtls_dict)
+                    brnz_slvr_dtls_dict = {}
+                    brnz_slvr_dtls_dict['source_schema'] = pd_brnz_slvr_dtls['SOURCE_SCHEMA'][ind]
+                    brnz_slvr_dtls_dict['source_table'] = pd_brnz_slvr_dtls['SOURCE_TABLE'][ind]
+                    brnz_slvr_dtls_dict['src_ld_dt'] = str(pd_brnz_slvr_dtls['SOURCE_LOAD_DATE'][ind])
+                    brnz_slvr_dtls_dict['file_ing_dtls_id'] = int(pd_brnz_slvr_dtls['FILE_INGESTION_DETAILS_ID'][ind])
+                    brnz_slvr_dtls_dict['brnz_slvr_dtls_id'] = int(pd_brnz_slvr_dtls['BRONZE_TO_SILVER_DETAILS_ID'][ind])
+                    brnz_slvr_dtls_dict['trans_status'] = pd_brnz_slvr_dtls['TRANSFORMATION_STATUS'][ind]
+                    bronze_slvr_dtls.append(brnz_slvr_dtls_dict)
+                # for i,j in bronze_slvr_dtls:
+                #     grp_by_obj={
+                #         "brnz_slvr_dtls_dict['source_schema']":i[0],
+                #         "brnz_slvr_dtls_dict['source_table']":i[1],
+                #         "brnz_slvr_dtls_dict['src_ld_dt']":i[2].strftime('%Y-%m-%d %H:%M:%S'),
+                #         "brnz_slvr_dtls_dict['file_ing_dtls_id']":str(i[3]),
+                #         "brnz_slvr_dtls_dict['brnz_slvr_dtls_id']":str(i[4]),
+                #         "brnz_slvr_dtls_dict['trans_status']":i[5],                        
+                #     }
+                #     grp_by_list.append(grp_by_obj)
+                    
             except Exception as e:
                 error_message = str(e).replace("'", "")
                 print(f"ERROR: {error_message}")
-        return snowflake_session, bronze_slvr_dtls
+        return bronze_slvr_dtls
 
     except Exception as e:
         error_message = str(e).replace("'", "")
         print(f"ERROR: {error_message}")
+        
+def call_process(**context):
+    bronze_slvr_dtls = process(context)
+    ls=[[brnz_slvr_dtls_dict] for brnz_slvr_dtls_dict in bronze_slvr_dtls]
+    return ls
+
+# def call_transforamtion():
+#     ls=[(brnz_slvr_dtls_dict) for brnz_slvr_dtls_dict in bronze_slvr_dtls]
+#     return ls
 
 
 default_args = {
@@ -328,25 +350,39 @@ default_args = {
 }
 
 
-dag = DAG(
-    'Transformation_dag_parallel',
+with DAG(
+    'Transformation_bronze_to_silver',
     default_args=default_args,
     catchup=False,
     schedule_interval=None,
-    dagrun_timeout=timedelta(minutes=60),
     max_active_tasks=5,
     params={
-        'database': 'DEV_OPS_DB',
-        'schema': 'CONFIG',
-        'run_failed': True
+        "database":Param(
+            default='DEV_OPS_DB',
+            type=["string"]
+        ),
+        "schema":Param(
+            default='CONFIG',
+            type=["string"]
+        ),
+        "run_failed":Param(
+            default=True
+        )
     }
-)
+) as dag:
 
-snowflake_session, bronze_slvr_dtls = process()
-
-with TaskGroup(group_id='transform' , dag= dag) as transform:
-    transformation_operator = PythonOperator.partial(
-        task_id='transformation_bronze_to_silver',
-        python_callable=transformation,
+    # snowflake_session, bronze_slvr_dtls = process(context)
+    process_operator=PythonOperator(
+        task_id='process_operator',
+        python_callable=call_process,
         dag=dag
-    ).expand(op_args=bronze_slvr_dtls)
+    )
+    
+    with TaskGroup(group_id='transform') as transform:
+        transformation_operator = PythonOperator.partial(
+            task_id='transformation_bronze_to_silver',
+            python_callable=transformation,
+            dag=dag
+        ).expand(op_args=process_operator.output)
+
+process_operator >> transformation_operator
