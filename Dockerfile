@@ -25,4 +25,6 @@ RUN curl https://pyenv.run | bash  && \
     pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r snowpark_requirements.txt
 
+# Installed Path 
+# /home/astro/.pyenv/versions/snowpark_env/bin/python
 

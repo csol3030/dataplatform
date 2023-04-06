@@ -1,8 +1,10 @@
 local:
   registry: localhost:5555
+postgres:
+  port: "5434"
 project:
-  name: astro-airflow
+  name: datalink-dp-airflow
 show_warnings: "true"
 upgrade_message: "true"
 webserver:
-  port: "8081"
+  port: "8082"
