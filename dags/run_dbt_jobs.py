@@ -276,8 +276,8 @@ with DAG(
             op_kwargs={"job_id": """{{params.dbt_cloud_job_id}}"""},
         )
 
-        dbt_job_run_silver_zone = DbtCloudRunJobOperator(
-            task_id="dbt_job_run_silver_zone",
+        dbt_job_run_silver_to_gold_zone = DbtCloudRunJobOperator(
+            task_id="dbt_job_run_silver_to_gold_zone",
             dbt_cloud_conn_id=DBT_CONN_ID,
             job_id="""{{params.dbt_cloud_job_id}}""",
             check_interval=10,
@@ -288,7 +288,7 @@ with DAG(
         get_job_status = PythonOperator(
             task_id="get_job_status",
             python_callable=get_status,
-            op_kwargs={"run_id": dbt_job_run_silver_zone.output},
+            op_kwargs={"run_id": dbt_job_run_silver_to_gold_zone.output},
         )
 
         # dbt_job_run_sensor = DbtCloudJobRunSensor(
@@ -298,7 +298,7 @@ with DAG(
         #     run_id=dbt_job_run_silver_zone.output,
         # )
 
-        check_dbt_job >> dbt_job_run_silver_zone >> get_job_status
+        check_dbt_job >> dbt_job_run_silver_to_gold_zone >> get_job_status
         # >> dbt_job_run_sensor
 
     with TaskGroup(group_id="cleanup") as cleanup:
