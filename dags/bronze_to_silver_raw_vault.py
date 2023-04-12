@@ -287,8 +287,6 @@ def transformation(brnz_slvr_dtls_dict,**context):
 
 def process(context):
     try:
-        # initiates snowflake connection
-        # iterates over BRONZE_SILVER_DETIALS table
 
         snowflake_session = get_snowflake_connection(context)
         
@@ -309,16 +307,6 @@ def process(context):
                     brnz_slvr_dtls_dict['brnz_slvr_dtls_id'] = int(pd_brnz_slvr_dtls['BRONZE_TO_SILVER_DETAILS_ID'][ind])
                     brnz_slvr_dtls_dict['trans_status'] = pd_brnz_slvr_dtls['TRANSFORMATION_STATUS'][ind]
                     bronze_slvr_dtls.append(brnz_slvr_dtls_dict)
-                # for i,j in bronze_slvr_dtls:
-                #     grp_by_obj={
-                #         "brnz_slvr_dtls_dict['source_schema']":i[0],
-                #         "brnz_slvr_dtls_dict['source_table']":i[1],
-                #         "brnz_slvr_dtls_dict['src_ld_dt']":i[2].strftime('%Y-%m-%d %H:%M:%S'),
-                #         "brnz_slvr_dtls_dict['file_ing_dtls_id']":str(i[3]),
-                #         "brnz_slvr_dtls_dict['brnz_slvr_dtls_id']":str(i[4]),
-                #         "brnz_slvr_dtls_dict['trans_status']":i[5],                        
-                #     }
-                #     grp_by_list.append(grp_by_obj)
                     
             except Exception as e:
                 error_message = str(e).replace("'", "")
@@ -334,9 +322,6 @@ def call_process(**context):
     ls=[[brnz_slvr_dtls_dict] for brnz_slvr_dtls_dict in bronze_slvr_dtls]
     return ls
 
-# def call_transforamtion():
-#     ls=[(brnz_slvr_dtls_dict) for brnz_slvr_dtls_dict in bronze_slvr_dtls]
-#     return ls
 
 
 default_args = {
@@ -351,7 +336,7 @@ default_args = {
 
 
 with DAG(
-    'Transformation_bronze_to_silver',
+    'af_bronze_to_silver',
     default_args=default_args,
     catchup=False,
     schedule_interval=None,
@@ -371,7 +356,7 @@ with DAG(
     }
 ) as dag:
 
-    # snowflake_session, bronze_slvr_dtls = process(context)
+
     process_operator=PythonOperator(
         task_id='process_operator',
         python_callable=call_process,

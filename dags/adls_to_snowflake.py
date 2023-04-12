@@ -504,7 +504,7 @@ default_args = {
 }
 
 with DAG(
-    dag_id='Process_ADLS_to_Snowflake',
+    dag_id='af_adls_to_snowflake',
     default_args=default_args,
     description='A DAG to process data stored in Azure Datalake Storage and write to Snowflake',
     schedule_interval=timedelta(days=30),
@@ -550,16 +550,6 @@ with DAG(
             python_callable=handle_blob_list,
             dag=dag
         ).expand(op_args=Process_Files_ADLS_Snowflake.output)
+
         
-    Transformation_bronze_to_silver = TriggerDagRunOperator(
-        task_id="Transformation_bronze_to_silver",
-        trigger_dag_id="Transformation_bronze_to_silver",
-        wait_for_completion=True,
-        conf={
-            "database":"""{{params.database}}""",
-            "schema":"""{{params.schema}}""",
-            "run_failed":"""{{params.run_failed}}"""
-        }
-    )
-        
-Process_Files_ADLS_Snowflake >> handle_blob_list_operator >> Transformation_bronze_to_silver
+Process_Files_ADLS_Snowflake >> handle_blob_list_operator 
