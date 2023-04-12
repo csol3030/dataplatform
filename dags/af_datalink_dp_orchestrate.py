@@ -43,9 +43,9 @@ with DAG(
 ) as dag:
     
     
-    af_sftp_to_adls_parallel_test = TriggerDagRunOperator(
-        task_id="af_sftp_to_adls_parallel_test",
-        trigger_dag_id="af_sftp_to_adls_parallel_test",
+    af_sftp_to_adls = TriggerDagRunOperator(
+        task_id="af_sftp_to_adls",
+        trigger_dag_id="af_sftp_to_adls",
         wait_for_completion=True,
         conf={
             "email":"""{{params.email}}""",
@@ -107,4 +107,4 @@ with DAG(
         }
     )
     
-af_sftp_to_adls_parallel_test >> af_adls_to_snowflake >> af_bronze_to_silver >> af_trigger_dbt_jobs >> af_trigger_airbyte_jobs
+af_sftp_to_adls >> af_adls_to_snowflake >> af_bronze_to_silver >> af_trigger_dbt_jobs >> af_trigger_airbyte_jobs
