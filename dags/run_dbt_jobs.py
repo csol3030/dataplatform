@@ -16,8 +16,7 @@ from airflow.operators.python import PythonOperator, ShortCircuitOperator
 from airflow.providers.snowflake.hooks.snowflake import SnowflakeHook
 from airflow.providers.dbt.cloud.operators.dbt import DbtCloudRunJobOperator
 from airflow.providers.dbt.cloud.sensors.dbt import (
-    DbtCloudJobRunSensor,
-    DbtCloudJobRunAsyncSensor,
+    DbtCloudJobRunSensor
 )
 from airflow.providers.dbt.cloud.hooks.dbt import DbtCloudHook, DbtCloudJobRunStatus
 from azure.identity import AzureCliCredential
@@ -70,48 +69,103 @@ def _check_job_not_running(job_id):
     return DbtCloudJobRunStatus.is_terminal(latest_run["status"])
 
 
-def get_status(run_id,**context):
-    start_time = time.time()
+def get_status(run_id, **context):
     dbt_job_id = context["params"]["dbt_cloud_job_id"]
     print("message=====================", run_id)
-    job_status_message=""
-    job_error_details=""
+    job_status = "IN PROGRESS"
+    job_error_details = ""
+    update_audit_table(run_id, dbt_job_id, job_status, job_error_details, context)
     try:
-
         job_sensor = DbtCloudJobRunSensor(
-                task_id="dbt_job_run_sensor",
-                dbt_cloud_conn_id=DBT_CONN_ID,
-                # poll_interval=10,
-                run_id=run_id,
-            ).execute(context=context)
-        
-        job_status_message = "success"
-        # job_error_details = 
+            task_id="dbt_job_run_sensor",
+            dbt_cloud_conn_id=DBT_CONN_ID,
+            # poll_interval=10,
+            run_id=run_id,
+        ).execute(context=context)
+
+        job_status = "SUCCESS"
+        # job_error_details =
 
     except Exception as err:
         print("job_status===============", err)
-        job_status_message = "failure"
+        job_status = "FAILURE"
         job_error_details = str(err)
 
     finally:
-        end_time = time.time()-start_time
-        job_audit_details = {
-            "job_id":dbt_job_id,
-            "start_date":start_time,
-            "end_date":end_time,
-            "status":job_status_message,
-            "error_details":job_error_details
+        update_audit_table(run_id, dbt_job_id, job_status, job_error_details, context)
+
+
+def update_audit_table(run_id, dbt_job_id, job_status, job_error_details, context):
+
+    hook = DbtCloudHook(DBT_CONN_ID)
+    runs = hook.list_job_runs(job_definition_id=dbt_job_id, order_by="-id")
+    latest_run = runs[0].json()["data"][0]
+
+    print("temp_run=========================", latest_run)
+
+    if latest_run["is_error"] == True and latest_run["is_complete"] == True:
+        if latest_run["status_message"] != None:
+            job_error_details = latest_run["status_message"]
+
+        err_obj = {
+            "error_message": job_error_details,
+            "job_debug_url": latest_run["href"],
         }
-        print("job_audit_details=========================",job_audit_details)
-        update_audit_table(job_audit_details)
+        job_error_details = err_obj
 
-        
-        
+    job_audit_details = {
+        "file_ingestion_details_id":"",
+        "job_run_id": str(run_id),
+        "job_id": dbt_job_id,
+        "job_run_duration": latest_run["run_duration"],
+        "status": job_status,
+        "error_details": job_error_details,
+        "start_date": latest_run["created_at"],
+        "end_date": latest_run["finished_at"],
+    }
+    print("job_audit_details=========================", job_audit_details)
+    db = context["params"]["config_db"]
+    schema = context["params"]["config_schema"]
+    table = "DBT_JOB_DETAILS"
+    sql_statement=""
 
-def update_audit_table(audit_details):
+    if job_status=="IN PROGRESS":
+        sql_statement = """insert into {}.{}.{} (
+            FILE_INGESTION_DETAILS_ID,
+            JOB_RUN_ID,
+            JOB_ID,
+            JOB_RUN_DURATION,
+            STATUS,
+            ERROR_DETAILS,
+            START_DATE
+        ) values ('{}','{}','{}','{}','{}','{}','{}')
+            """.format(
+                db,schema,table,
+                job_audit_details["file_ingestion_details_id"],
+                job_audit_details["job_run_id"],
+                job_audit_details["job_id"],
+                job_audit_details["job_run_duration"],
+                job_audit_details["status"],
+                job_audit_details["error_details"],
+                job_audit_details["start_date"]     
+            )
+    else:
+        sql_statement = """update {}.{}.{} set 
+                JOB_RUN_DURATION='{}', STATUS='{}', ERROR_DETAILS='{}', START_DATE='{}',END_DATE='{}'
+            """.format(
+                db,schema,table,
+                job_audit_details["job_run_duration"],
+                job_audit_details["status"],
+                json.dumps(job_audit_details["error_details"]),
+                job_audit_details["start_date"],
+                job_audit_details["end_date"]
+            )
+    
+    print("sql_statement===========================",sql_statement)
+
     snf_hook = SnowflakeHook(snowflake_conn_id=SNOWFLAKE_CONN_ID)
-    # snf_hook.insert_rows
-    pass
+    snf_hook.run(sql=sql_statement)
+
 
 def get_kv_secret(secret_name):
     fetched_secret = kv_client.get_secret(secret_name)
@@ -236,7 +290,6 @@ with DAG(
             python_callable=get_status,
             op_kwargs={"run_id": dbt_job_run_silver_zone.output},
         )
-        
 
         # dbt_job_run_sensor = DbtCloudJobRunSensor(
         #     task_id="dbt_job_run_sensor",
@@ -245,11 +298,8 @@ with DAG(
         #     run_id=dbt_job_run_silver_zone.output,
         # )
 
-
-        
-
         check_dbt_job >> dbt_job_run_silver_zone >> get_job_status
-        # >> dbt_job_run_sensor 
+        # >> dbt_job_run_sensor
 
     with TaskGroup(group_id="cleanup") as cleanup:
         del_conn = PythonOperator(
