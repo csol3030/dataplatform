@@ -444,14 +444,16 @@ def process(**context):
                 blob_i,file_columns=blob_i_col
                 if not file_columns:
                     continue
-                blob_i_col_lst.append((blob_i, file_columns, file_dict))
-        ls=[(file_dict, blob_i, file_columns) for blob_i, file_columns, file_dict  in blob_i_col_lst]
+                created, table_columns = get_or_create_target_table(
+                    snowflake_session, file_dict, file_columns)
+                blob_i_col_lst.append((blob_i, file_columns, file_dict, created, table_columns))
+        ls=[(file_dict, blob_i, file_columns,created, table_columns) for blob_i, file_columns, file_dict, created, table_columns in blob_i_col_lst]
         return ls
     except Exception as e:
         print(e)
         
 
-def handle_blob_list(file_dict, blob_i, file_columns, **context):
+def handle_blob_list(file_dict, blob_i, file_columns, created, table_columns, **context):
     # main function
     # iterates over FILE_DETIALS records
     # gets pattern matched files and respective file columns
@@ -464,8 +466,8 @@ def handle_blob_list(file_dict, blob_i, file_columns, **context):
     azure_connection = get_azure_connection(context)
     
     try:
-        created, table_columns = get_or_create_target_table(
-        snowflake_session, file_dict, file_columns)
+        # created, table_columns = get_or_create_target_table(
+        # snowflake_session, file_dict, file_columns)
         handle_schema_drift, columns_zip, schema_drift_columns = check_schema_drift(
             snowflake_session, file_dict, created, file_columns, table_columns)
         file_name, load_timestamp = insert_file_ingestion_details(snowflake_session, blob_i)
