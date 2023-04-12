@@ -31,7 +31,7 @@ ADLS_CONN_ID = "datalink_adls_conn"
 SNOWFLAKE_CONN_ID = "datalink_snowflake_conn"
 
 ENV_ID = "DEV"
-DAG_ID = "af_sftp_to_adls_parallel_test"
+DAG_ID = "af_sftp_to_adls"
 
 default_args = {
     "owner": "Airflow User",
