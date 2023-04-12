@@ -52,18 +52,19 @@ def cleanup_xcom(session=None, **context):
     session.query(XCom).filter(XCom.dag_id == dag_id).delete()
 
 
-def get_status(run_id, **context):
+def get_status(**context):
     airbyte_job_id = context["params"]["airbyte_job_id"]
-    print("message=====================", run_id, airbyte_job_id)
+    airbyte_job_run_id = context["airbyte_job_run_id"]
+    print("message=====================", airbyte_job_run_id, airbyte_job_id)
     job_status = "IN PROGRESS"
     job_error_details = ""
     created_at = datetime.now()
-    update_audit_table(run_id, airbyte_job_id, job_status, job_error_details, created_at, context)
+    update_audit_table(airbyte_job_run_id, airbyte_job_id, job_status, job_error_details, created_at, context)
     try:
         job_sensor = AirbyteJobSensor(
             task_id="airbyte_sensor_snowflake_sqlserver",
             airbyte_conn_id=AIRBYTE_CONN_ID,
-            airbyte_job_id=run_id,
+            airbyte_job_id=airbyte_job_run_id,
         ).execute(context=context)
 
         job_status = "SUCCESS"
@@ -73,23 +74,26 @@ def get_status(run_id, **context):
         print("job_status===============", err)
         job_status = "FAILURE"
         job_error_details = str(err)
+        # job_status = "SUCCESS"
 
     finally:
         update_audit_table(
-            run_id, airbyte_job_id, job_status, job_error_details, created_at, context
+            airbyte_job_run_id, airbyte_job_id, job_status, job_error_details, created_at, context
         )
         pass
 
 
-def update_audit_table(run_id, airbyte_job_id, job_status, job_error_details, created_at, context):
-    print("update_audit_table=================================================",run_id, airbyte_job_id, job_status, job_error_details)
+def update_audit_table(airbyte_job_run_id, airbyte_job_id, job_status, job_error_details, created_at, context):
+    print("update_audit_table=================================================",airbyte_job_run_id, airbyte_job_id, job_status, job_error_details)
+    latest_run=None
+    try:
+        hook = AirbyteHook(airbyte_conn_id=AIRBYTE_CONN_ID)
+        job = hook.get_job(job_id=airbyte_job_run_id)
+        latest_run = job.json()["job"]
+    except Exception as err:
+        print(err)
 
-    # hook = AirbyteHook(airbyte_conn_id=AIRBYTE_CONN_ID)
-    # hook.wait_for_job(job_id=airbyte_job_id, wait_seconds=5)
-    # job = hook.get_job(job_id=airbyte_job_id)
-    # latest_run = job.json()["job"]
-
-    # print("temp_run=========================", latest_run)
+    print("temp_run=========================", latest_run)
 
     # if latest_run["is_error"] == True and latest_run["is_complete"] == True:
     #     if latest_run["status_message"] != None:
@@ -103,13 +107,13 @@ def update_audit_table(run_id, airbyte_job_id, job_status, job_error_details, cr
 
     job_audit_details = {
         "file_ingestion_details_id":"",
-        "job_run_id": str(run_id),
+        "job_run_id": str(airbyte_job_run_id),
         "job_id": airbyte_job_id,
-        # "job_run_duration": latest_run["run_duration"],
+        "job_run_duration": "",
         "status": job_status,
         "error_details": job_error_details,
-        "start_date": created_at,
-        "end_date": datetime.now(),
+        "start_date": datetime.fromtimestamp(latest_run["createdAt"]),
+        "end_date": datetime.fromtimestamp(latest_run["updatedAt"])
     }
     print("job_audit_details=========================", job_audit_details)
     db = context["params"]["config_db"]
@@ -122,24 +126,28 @@ def update_audit_table(run_id, airbyte_job_id, job_status, job_error_details, cr
             FILE_INGESTION_DETAILS_ID,
             JOB_RUN_ID,
             JOB_ID,
+            JOB_RUN_DURATION,
             STATUS,
             ERROR_DETAILS,
             START_DATE
-        ) values ('{}','{}','{}','{}','{}','{}')
+        ) values ('{}','{}','{}','{}','{}','{}','{}')
             """.format(
                 db,schema,table,
                 job_audit_details["file_ingestion_details_id"],
                 job_audit_details["job_run_id"],
                 job_audit_details["job_id"],
+                job_audit_details["job_run_duration"],
                 job_audit_details["status"],
                 job_audit_details["error_details"],
                 job_audit_details["start_date"]
             )
     else:
+        job_audit_details["job_run_duration"] = latest_run["updatedAt"]-latest_run["createdAt"]
         sql_statement = """update {}.{}.{} set
-                STATUS='{}', ERROR_DETAILS='{}', START_DATE='{}',END_DATE='{}'
+                JOB_RUN_DURATION='{}', STATUS='{}', ERROR_DETAILS='{}', START_DATE='{}',END_DATE='{}'
             """.format(
                 db,schema,table,
+                job_audit_details["job_run_duration"],
                 job_audit_details["status"],
                 json.dumps(job_audit_details["error_details"]),
                 job_audit_details["start_date"],
@@ -247,7 +255,7 @@ with DAG(
         "config_db": Param(default="DEV_OPS_DB", type=["string"], min=1, max=255),
         "config_schema": Param(default="CONFIG", type=["string"], min=1, max=255),
         "airbyte_job_id": Param(
-            default="f46636f3-0975-4b0a-b829-85365477dbec",
+            default="",
             type=["string"],
             min=1,
             max=255,
