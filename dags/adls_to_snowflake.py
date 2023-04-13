@@ -1,5 +1,6 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator
+from airflow.operators.external_python_operator import ExternalPythonOperator
 from airflow.models.param import Param
 from airflow.utils.task_group import TaskGroup
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
@@ -540,15 +541,25 @@ with DAG(
     }
 )as dag:
 
-    Process_Files_ADLS_Snowflake = PythonOperator(
-        task_id='Process_Files_ADLS_Snowflake',
-        python_callable=process
+    # Process_Files_ADLS_Snowflake = PythonOperator(
+    #     task_id='Process_Files_ADLS_Snowflake',
+    #     python_callable=process
+    # )
+    Process_Files_ADLS_Snowflake = ExternalPythonOperator(
+        task_id="Process_Files_ADLS_Snowflake",
+        python="/home/astro/.pyenv/versions/snowpark_env/bin/python",
+        python_callable=process,
     )
-
     with TaskGroup(group_id='Process_Files', dag=dag) as Process_Files:
         
-        handle_blob_list_operator = PythonOperator.partial(
-            task_id='Process_Files',
+        # handle_blob_list_operator = PythonOperator.partial(
+        #     task_id='Process_Files',
+        #     python_callable=handle_blob_list,
+        #     dag=dag
+        # ).expand(op_args=Process_Files_ADLS_Snowflake.output)
+        handle_blob_list_operator = ExternalPythonOperator.partial(
+            task_id="Process_Files",
+            python="/home/astro/.pyenv/versions/snowpark_env/bin/python",
             python_callable=handle_blob_list,
             dag=dag
         ).expand(op_args=Process_Files_ADLS_Snowflake.output)
