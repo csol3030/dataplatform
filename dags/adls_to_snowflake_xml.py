@@ -139,7 +139,7 @@ def update_file_ingestion_details(snowflake_session, file_details_id, file_path,
 
     # file key will be in the response if copy into command is executed
     if 'file' in ingestion_details:
-        if ingestion_details['first_error']:
+        if ingestion_details.get('first_error'):
             error_details = {
                 'first_error': ingestion_details['first_error'],
                 'error_limit': ingestion_details['error_limit'],
@@ -432,9 +432,9 @@ def check_schema_drift(snowflake_session, file_dict, created, file_columns, tabl
             print('Error: Cannot Handle Schema Drift Without Header Row')
             return (False, 'ERROR:Cannot Handle Schema Drift Without Header Row', dict())
 
-def format_copy_into_response(resp_copy_into, file_dict):
+def format_copy_into_response(resp_copy_into, file_dict, src_files):
     if CCD_FILE_EXT in file_dict['file_wild_card_ext'].upper():
-        response = {'status': 'LOADED', 'rows_loaded': 0, 'error_details': ''}
+        response = {'file': src_files, 'status': 'LOADED', 'rows_loaded': 0, 'error_details': ''}
         for resp in resp_copy_into:
             resp_dict = resp.as_dict()
             if resp_dict['status'] != response['status']:
@@ -492,7 +492,7 @@ def copy_into_snowflake(snowflake_session, file_dict, src_file_name, data,
                     from '{stg_src}' as t) {add_attr} FILE_FORMAT = ({file_format_str})
                     on_error='skip_file' FORCE = TRUE"""
     resp_copy_into = snowflake_session.sql(copy_into_str).collect()
-    response = format_copy_into_response(resp_copy_into, file_dict)
+    response = format_copy_into_response(resp_copy_into, file_dict, str(src_file_name))
     print(response)
     return response
 
