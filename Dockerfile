@@ -1,4 +1,4 @@
-FROM quay.io/astronomer/astro-runtime:7.3.0
+FROM quay.io/astronomer/astro-runtime:7.4.2
 
 ##### Docker Customizations below this line #####
 ## Install Azure CLI - Direct
