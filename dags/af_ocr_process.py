@@ -15,6 +15,7 @@ from airflow.utils.edgemodifier import Label
 from airflow.operators.python import PythonOperator
 from airflow.providers.snowflake.hooks.snowflake import SnowflakeHook
 
+from azure.storage.blob import BlobServiceClient, BlobClient
 from azure.identity import AzureCliCredential
 from azure.keyvault.secrets import SecretClient
 
@@ -59,13 +60,27 @@ def get_kv_secret(secret_name):
     # print(fetched_secret.value)
     return fetched_secret.value
 
+adls_details = json.loads(get_kv_secret(KEYVAULT_ADLS_BLOB_SECRET))
+blob_service_client = BlobServiceClient.from_connection_string(
+    conn_str=adls_details["connection_string"]
+)
+container_name = 'cont-datalink-dp-shared' 
+folder_path = 'OCR_DATA/'
+
+def download_blob_to_file(blob_service_client: BlobServiceClient, container_name): 
+    blob_client = blob_service_client.get_blob_client(container=container_name, blob="OCR_DATA/AetnaMA_Smith_Jane_12.17.1950_OMWb.pdf") 
+    download_stream = blob_client.download_blob() 
+    bytes_data=download_stream.readall() 
+    return bytes_data
+
 def get_ocr_details():
 
     print("============inside get_ocr_details================")
-    formUrl = r"C:\Anblicks\Projects\Datalink\Utilities\org_file\AetnaMA_Smith_Jane_12.17.1950_OMWb.pdf"
+    # formUrl = r"C:\Anblicks\Projects\Datalink\Utilities\org_file\AetnaMA_Smith_Jane_12.17.1950_OMWb.pdf"
 
-    with open(formUrl,'rb') as pdf_file:
-        bytes_data = pdf_file.read()
+    # with open(formUrl,'rb') as pdf_file:
+    #     bytes_data = pdf_file.read()
+    bytes_data = download_blob_to_file(blob_service_client,container_name)
 
     ocr_utils.get_ocr_output(ocr_mode="cloud",document=bytes_data)
 
