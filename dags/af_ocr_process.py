@@ -14,9 +14,8 @@ from airflow.models.param import Param
 from airflow.utils.edgemodifier import Label
 from airflow.operators.python import PythonOperator
 from airflow.providers.snowflake.hooks.snowflake import SnowflakeHook
-from airflow.providers.snowflake.operators.snowflake import SnowflakeOperator
 
-from azure.storage.blob import BlobServiceClient, BlobClient
+from azure.storage.blob import BlobServiceClient
 from azure.identity import AzureCliCredential
 from azure.keyvault.secrets import SecretClient
 
@@ -78,10 +77,6 @@ def download_blob_to_file(
 
 def get_ocr_details(**context):
     print("============inside get_ocr_details================", context["params"])
-    # formUrl = r"C:\Anblicks\Projects\Datalink\Utilities\org_file\AetnaMA_Smith_Jane_12.17.1950_OMWb.pdf"
-
-    # with open(formUrl,'rb') as pdf_file:
-    #     bytes_data = pdf_file.read()
 
     if context["params"]:
         mode = context["params"]["ocr_mode"]
@@ -97,8 +92,6 @@ def get_ocr_details(**context):
             blob_service_client, container_name, file_path
         )
         result = ocr_utils.get_ocr_output(ocr_mode=mode, document=bytes_data)
-        # result["content"] = result["content"].replace("\n","\\n")
-        # result["content"] = json.dumps(result["content"])
 
         write_output_to_snowflake({"doc_name": blob_name, "extracted_content": result, "table_name":table_name})
 
@@ -106,6 +99,7 @@ def get_ocr_details(**context):
 def write_output_to_snowflake(data):
 
     print("=========data==========",data)
+
     if data is not None:
         data["extracted_content"]["file_name"] = data["doc_name"]
         doc_content = data["extracted_content"]
@@ -113,19 +107,13 @@ def write_output_to_snowflake(data):
 
         snf_table = data["table_name"]
 
-        print("================row================", doc_content)
-
         sql_statement = (
             rf"insert into {snf_table} (DOC_DETAILS) (select PARSE_JSON('"
             + json.dumps(doc_content)
             + "') ) "
         )
 
-        print("================row================", type(doc_content), sql_statement)
-
         snf_hook = SnowflakeHook(snowflake_conn_id=SNOWFLAKE_CONN_ID)
-        # res = snf_hook.get_sqlalchemy_engine().execute(statement=sql_statement).fetchone()
-
         snf_hook.run(sql=sql_statement)
 
 
