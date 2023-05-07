@@ -91,29 +91,8 @@ def analyze_document(bytes_doc, key_list=[]):
             "Accession number:","Reported by:","Interpreted By:"
         ]
 
-    # extracted_info = {
-    #     # Generic Info
-    #     "patient": extract_generic_info("Patient:"),
-    #     "dob": extract_generic_info("DOB:"),
-    #     "gender": extract_generic_info("Sex:"),
-    #     "age": extract_generic_info("Age:"),
-    #     "mr_no": extract_generic_info("MR#:"),
-    #     "fin": extract_generic_info("FIN:"),
-    #     "visit_date": extract_generic_info("Visit Date:"),
-    #     "visit_time": extract_generic_info("Visit Time:"),
-    #     "visit_type": extract_generic_info("Visit Type:"),
-    #     "service_datetime": extract_generic_info("Service Date / Time:"),
-    #     "document_name": extract_generic_info("Document Name:"),
-    #     "provider": extract_generic_info("Provider:"),
-    #     "ethnicity": extract_generic_info("Ethnicity:"),
-    #     "referring_provider": extract_generic_info("Referring Provider:"),
-    #     "indication": extract_generic_info("Indication:"),
-    #     "study": extract_generic_info("Study:"),
-    #     "exam_date": extract_generic_info("Exam Date:"),
-    #     "accession_number": extract_generic_info("Accession number:"),
-    #     "reported_by": extract_generic_info("Reported by:"),
-    #     "interpreted_by": extract_generic_info("Interpreted By:"),
-    # }
+    print("==============version===============",pytesseract.get_tesseract_version())
+
     KeyValueInfo = []
     for key in key_list:
         KeyValueInfo.append({
@@ -125,4 +104,3 @@ def analyze_document(bytes_doc, key_list=[]):
     print(doc_info)
 
     return doc_info
-

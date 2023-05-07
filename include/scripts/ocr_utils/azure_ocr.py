@@ -54,11 +54,11 @@ def analyze_document(bytes_doc):
     for kv_pair in result.key_value_pairs:
         kv_details = {}
         if kv_pair.key:
-            kv_details["key"] = kv_pair.key.content
+            kv_details["key"] = kv_pair.key.content.replace("\n","\\n")
             # kv_details["key_bounding_region"] = format_bounding_region(kv_pair.key.bounding_regions)
         
         if kv_pair.value:
-            kv_details["value"] = kv_pair.value.content
+            kv_details["value"] = kv_pair.value.content.replace("\n","\\n")
             # kv_details["value_bounding_region"] = format_bounding_region(kv_pair.value.bounding_regions)
 
         KeyValueInfo.append(kv_details)
@@ -66,4 +66,4 @@ def analyze_document(bytes_doc):
     doc_info = {"content":content,"kv_pairs":KeyValueInfo}
     print(doc_info)
 
-    return KeyValueInfo
+    return doc_info
