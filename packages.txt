@@ -14,3 +14,9 @@ xz-utils
 tk-dev
 libpq-dev
 krb5-config
+apt-transport-https
+ca-certificates 
+curl 
+gnupg2 
+software-properties-common
+poppler-utils
