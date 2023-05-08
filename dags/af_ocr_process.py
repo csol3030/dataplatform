@@ -74,9 +74,37 @@ def download_blob_to_file(
     bytes_data = download_stream.readall()
     return bytes_data
 
+def get_files_from_adls(**context):
 
-def get_ocr_details(**context):
-    print("============inside get_ocr_details================", context["params"])
+    if context["params"]:
+        blob_list = []
+        try:
+            print("============inside get_files_from_adls================", context["params"])
+            
+            container_name = context["params"]["container_name"]
+            container_client = blob_service_client.get_container_client(container_name) 
+            folder_path = context["params"]["folder_path"]
+            blobs = container_client.list_blobs(folder_path+"/")
+            blob_name = context["params"]["file_name"]
+            if blob_name != "":
+                file_name = os.path.join(folder_path,blob_name)
+                blob_list.append([file_name])
+            else:
+                for blob in blobs: 
+                    if not blob.name.endswith('/'):  
+                        blob_list.append([blob.name])
+
+            # bytes_data = download_blob_to_file( blob_service_client, container_name, blob.name )
+            # print(bytes_data)
+        except Exception as err:
+            print("Error Occured ",err)
+        finally:
+            print("===="*5,blob_list)
+            return blob_list
+
+
+def get_ocr_details(data, **context):
+    print("============inside get_ocr_details================",data, context["params"])
 
     if context["params"]:
         mode = context["params"]["ocr_mode"]
@@ -88,12 +116,18 @@ def get_ocr_details(**context):
         file_path = os.path.join(folder_path, blob_name)
         print("path==================", file_path)
 
-        bytes_data = download_blob_to_file(
-            blob_service_client, container_name, file_path
-        )
-        result = ocr_utils.get_ocr_output(ocr_mode=mode, document=bytes_data)
+        if data:
+            bytes_data = download_blob_to_file(
+                blob_service_client, container_name, data
+            )
+            result = ocr_utils.get_ocr_output(ocr_mode=mode, document=bytes_data)
+            result["file_name"] = blob_name
 
-        write_output_to_snowflake({"doc_name": blob_name, "extracted_content": result, "table_name":table_name})
+            del result["content"]
+            
+            write_output_to_snowflake({"extracted_content": result, "table_name":table_name})
+    else:
+        return None
 
 
 def write_output_to_snowflake(data):
@@ -101,10 +135,8 @@ def write_output_to_snowflake(data):
     print("=========data==========",data)
 
     if data is not None:
-        data["extracted_content"]["file_name"] = data["doc_name"]
-        doc_content = data["extracted_content"]
-        del doc_content["content"]
 
+        doc_content = data["extracted_content"]
         snf_table = data["table_name"]
 
         sql_statement = (
@@ -177,7 +209,7 @@ with DAG(
         ),
         "folder_path": Param(default="OCR_DATA", type=["string"], min=3, max=255),
         "file_name": Param(
-            default="AetnaMA_Smith_Jane_12.17.1950_OMWb.pdf",
+            default="",
             type=["string"],
             min=3,
             max=255,
@@ -197,9 +229,13 @@ with DAG(
         task_id="create_connections", python_callable=create_connection
     )
 
-    exec_ocr_process = PythonOperator(
-        task_id="exec_ocr_process", python_callable=get_ocr_details
+    get_files_adls = PythonOperator(
+        task_id="get_files_from_adls", python_callable=get_files_from_adls
     )
+    
+    exec_ocr_process = PythonOperator.partial(
+        task_id="exec_ocr_process", python_callable=get_ocr_details
+    ).expand(op_args=get_files_adls.output)
 
     with TaskGroup(group_id="cleanup") as cleanup:
         del_conn = PythonOperator(
@@ -213,4 +249,4 @@ with DAG(
             dag=dag,
         )
 
-    create_conn >> exec_ocr_process >> cleanup
+    create_conn >> get_files_adls >> exec_ocr_process >> cleanup
