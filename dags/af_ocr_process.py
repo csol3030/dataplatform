@@ -109,7 +109,7 @@ def write_output_to_snowflake(data):
 
         sql_statement = (
             rf"insert into {snf_table} (DOC_DETAILS) (select PARSE_JSON('"
-            + json.dumps(doc_content)
+            + json.dumps(doc_content).replace("'", r"\'").replace("(", r"\(").replace(")", r"\)")
             + "') ) "
         )
 
