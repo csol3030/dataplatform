@@ -91,16 +91,29 @@ def get_files_from_adls(**context):
                 blob_list.append([file_name])
             else:
                 for blob in blobs: 
-                    if not blob.name.endswith('/'):  
-                        blob_list.append([blob.name])
+                    if not blob.name.endswith('/'): 
+                        blob_details = {
+                            "blob_path" : blob.name,
+                            "blob_name" : blob.name.split("/")[-1]
+                        }
+                        print(blob_details)
+                        blob_list.append([blob_details])
 
-            # bytes_data = download_blob_to_file( blob_service_client, container_name, blob.name )
-            # print(bytes_data)
         except Exception as err:
             print("Error Occured ",err)
         finally:
             print("===="*5,blob_list)
             return blob_list
+
+
+def escape_special_chars(my_string):
+    escaped_string = ""
+    for char in my_string:
+        if char in ['\\', '\'', '\"', '\t', '@', '_', '!', '#', '$', '%', '^', '&', '*', '(', ')', '<', '>', '?', '/', '|', '}', '{', '~', ':']:
+            escaped_string += '\\' + char
+        else:
+            escaped_string += char
+    return escaped_string
 
 
 def get_ocr_details(data, **context):
@@ -110,24 +123,24 @@ def get_ocr_details(data, **context):
         mode = context["params"]["ocr_mode"]
         container_name = context["params"]["container_name"]
         folder_path = context["params"]["folder_path"]
-        blob_name = context["params"]["file_name"]
         table_name = context["params"]["ocr_table"]
 
-        file_path = os.path.join(folder_path, blob_name)
-        print("path==================", file_path)
-
         if data:
+            blob_name = data["blob_name"]
+            file_path = os.path.join(folder_path, blob_name)
+            print("path==================", file_path)
             bytes_data = download_blob_to_file(
-                blob_service_client, container_name, data
+                blob_service_client, container_name, data["blob_path"]
             )
             result = ocr_utils.get_ocr_output(ocr_mode=mode, document=bytes_data)
             result["file_name"] = blob_name
-
-            del result["content"]
-            
+            result["content"] = result["content"].replace("\n",r"\n")
+            result["content"] = escape_special_chars(result["content"])
+            print(result["content"])
             write_output_to_snowflake({"extracted_content": result, "table_name":table_name})
     else:
         return None
+
 
 
 def write_output_to_snowflake(data):
