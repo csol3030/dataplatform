@@ -106,14 +106,14 @@ def get_files_from_adls(**context):
             return blob_list
 
 
-def escape_special_chars(my_string):
-    escaped_string = ""
-    for char in my_string:
-        if char in ['\\', '\'', '\"', '\t', '@', '_', '!', '#', '$', '%', '^', '&', '*', '(', ')', '<', '>', '?', '/', '|', '}', '{', '~', ':']:
-            escaped_string += '\\' + char
-        else:
-            escaped_string += char
-    return escaped_string
+# def escape_special_chars(my_string):
+#     escaped_string = ""
+#     for char in my_string:
+#         if char in ['\\', '\'', '\"', '\t', '@', '_', '!', '#', '$', '%', '^', '&', '*', '(', ')', '<', '>', '?', '/', '|', '}', '{', '~', ':']:
+#             escaped_string += '\\' + char
+#         else:
+#             escaped_string += char
+#     return escaped_string
 
 
 def get_ocr_details(data, **context):
@@ -134,9 +134,9 @@ def get_ocr_details(data, **context):
             )
             result = ocr_utils.get_ocr_output(ocr_mode=mode, document=bytes_data)
             result["file_name"] = blob_name
-            result["content"] = result["content"].replace("\n",r"\n")
-            result["content"] = escape_special_chars(result["content"])
-            print(result["content"])
+            # result["content"] = result["content"].replace("\n",r"\n")
+            # result["content"] = escape_special_chars(result["content"])
+            # print(result["content"])
             write_output_to_snowflake({"extracted_content": result, "table_name":table_name})
     else:
         return None
@@ -153,9 +153,7 @@ def write_output_to_snowflake(data):
         snf_table = data["table_name"]
 
         sql_statement = (
-            rf"insert into {snf_table} (DOC_DETAILS) (select PARSE_JSON('"
-            + json.dumps(doc_content).replace("'", r"\'").replace("(", r"\(").replace(")", r"\)")
-            + "') ) "
+            rf"insert into {snf_table} (DOC_DETAILS) (select PARSE_JSON($${json.dumps(doc_content)}$$) )"
         )
 
         snf_hook = SnowflakeHook(snowflake_conn_id=SNOWFLAKE_CONN_ID)
