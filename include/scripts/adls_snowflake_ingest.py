@@ -24,7 +24,7 @@ LOAD_DATE = 'LOAD_DATE'
 KEYVAULT_URI = 'https://kv-datalink-dp-pilot.vault.azure.net'
 
 CCD_FILE_EXT = 'XML'
-CCD_TABLE_COLUMN = 'SRC_CCD'
+CCD_TABLE_COLUMNS = ['XML_DATA']
 CCD_META_DATA_COLUMNS = ['FILENAME']
 
 
@@ -514,7 +514,7 @@ def process(context):
         blob_i_col_lst = []
         for blob_list, file_dict in file_dtls_blb_lst:
             if CCD_FILE_EXT in file_dict['file_wild_card_ext'].upper():
-                file_columns = [CCD_TABLE_COLUMN]
+                file_columns = CCD_TABLE_COLUMNS
                 created, table_columns = get_or_create_target_table(
                         snowflake_session, file_dict, file_columns)
                 blob_i_col_lst.append((blob_list, file_columns, file_dict, created, table_columns))
