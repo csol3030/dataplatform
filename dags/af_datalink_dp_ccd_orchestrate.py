@@ -58,7 +58,7 @@ with DAG(
         wait_for_completion=True,
         trigger_rule="all_done",
         conf={
-            "sql":"""{{params.sp_exec_cmd}}"""
+            "sp_exec_cmd":"""{{params.sp_exec_cmd}}"""
         }
     )
     
