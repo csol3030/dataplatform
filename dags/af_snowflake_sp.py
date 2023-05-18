@@ -105,9 +105,6 @@ with DAG(
     default_args=default_args,
     params={
         "email": Param(default="abhilash.p@anblicks.com", type="string"),
-        "customer_id": Param(default=120, type=["integer", "string"], min=1, max=255),
-        "config_db": Param(default="DEV_OPS_DB", type=["string"], min=1, max=255),
-        "config_schema": Param(default="CONFIG", type=["string"], min=1, max=255),
         "sp_exec_cmd": Param(
             default="CALL SAMPLE_DB.PUBLIC.SAMPLE_STORED_PROC();",
             description="List of stored procedure names separated by semi-colon(;)",
