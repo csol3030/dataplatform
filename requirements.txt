@@ -1,0 +1,13 @@
+azure-storage-blob==12.15.0
+azure-identity==1.12.0
+azure-keyvault-secrets==4.7.0
+apache-airflow-providers-airbyte==3.2.0
+apache-airflow-providers-dbt-cloud==3.1.0
+azure-ai-formrecognizer==3.2.0
+pytesseract
+pdf2image
+# opencv-python
+opencv-python-headless
+Pillow
+pgpy
+pysftp
